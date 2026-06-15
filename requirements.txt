@@ -1,0 +1,9 @@
+pydantic>=2.0
+tiktoken
+sqlalchemy
+numpy
+psycopg2-binary
+anthropic
+sentence-transformers
+litellm[proxy]
+letta-client>=1.0  # optional: eval/niah_live.py Letta baseline

@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local secrets
+.env
+
+# Long-term memory artifacts
+memory.db
+eval/contexts/
+
+# Stress-test outputs (JSON results, PNG charts)
+eval/results/
