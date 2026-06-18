@@ -51,7 +51,6 @@ LongTermBlock {
   last_accessed: datetime
   decay_score: float
   is_reconstructed: bool          # true if rebuilt via LLM hallucination
-  referenced_by: List[str]        # cache block IDs with pointers here
 }
 ```
 
@@ -414,8 +413,7 @@ CREATE TABLE lt_blocks (
     access_count        INTEGER NOT NULL DEFAULT 0,
     last_accessed       TEXT,
     created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
-    is_reconstructed    INTEGER NOT NULL DEFAULT 0,
-    referenced_by       TEXT    DEFAULT '[]'
+    is_reconstructed    INTEGER NOT NULL DEFAULT 0
 );
 
 -- sqlite-vec virtual table for ANN search
@@ -457,8 +455,7 @@ CREATE TABLE lt_blocks (
     access_count        INT     NOT NULL DEFAULT 0,
     last_accessed       TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    is_reconstructed    BOOLEAN NOT NULL DEFAULT FALSE,
-    referenced_by       TEXT[]  DEFAULT '{}'
+    is_reconstructed    BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX ON lt_blocks USING hnsw (embedding vector_cosine_ops);
