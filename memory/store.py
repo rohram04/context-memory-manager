@@ -1,35 +1,35 @@
 from __future__ import annotations
 
 import heapq
-from typing import ClassVar
 
 import numpy as np
 
 from memory.block import CacheBlock
-
-
-def _priority(block: CacheBlock) -> float:
-    novelty_resistance = 1.0 - block.novelty_score
-    recency_resistance = 1.0 - block.decay_score
-    compressibility = 0.6 * novelty_resistance + 0.4 * recency_resistance
-    return block.token_cost * compressibility
+from memory.config import MemoryConfig
 
 
 class ContextStore:
-    PRESSURE_THRESHOLDS: ClassVar[dict[str, float]] = {
-        "critical": 0.90,
-        "high": 0.75,
-        "medium": 0.50,
-        "low": 0.0,
-    }
-
-    def __init__(self, max_tokens: int) -> None:
+    def __init__(self, max_tokens: int, config: MemoryConfig | None = None) -> None:
         self._max_tokens = max_tokens
+        self._config = config or MemoryConfig()
         self._blocks: dict[str, CacheBlock] = {}
         self._heap: list[tuple[float, str]] = []  # (-priority, block_id)
 
+    @property
+    def config(self) -> MemoryConfig:
+        return self._config
+
+    def _priority(self, block: CacheBlock) -> float:
+        novelty_resistance = 1.0 - block.novelty_score
+        recency_resistance = 1.0 - block.decay_score
+        compressibility = (
+            self._config.compress_novelty_weight * novelty_resistance
+            + self._config.compress_recency_weight * recency_resistance
+        )
+        return block.token_cost * compressibility
+
     def _rebuild(self) -> None:
-        self._heap = [(-_priority(b), b.id) for b in self._blocks.values()]
+        self._heap = [(-self._priority(b), b.id) for b in self._blocks.values()]
         heapq.heapify(self._heap)
 
     # ------------------------------------------------------------------
@@ -38,7 +38,7 @@ class ContextStore:
 
     def add(self, block: CacheBlock) -> None:
         self._blocks[block.id] = block
-        heapq.heappush(self._heap, (-_priority(block), block.id))
+        heapq.heappush(self._heap, (-self._priority(block), block.id))
 
     def remove(self, block_id: str) -> CacheBlock | None:
         block = self._blocks.pop(block_id, None)
@@ -90,8 +90,9 @@ class ContextStore:
     @property
     def budget_pressure(self) -> str:
         f = self.budget_fraction
+        thresholds = self._config.pressure_thresholds
         for level in ("critical", "high", "medium", "low"):
-            if f >= self.PRESSURE_THRESHOLDS[level]:
+            if f >= thresholds[level]:
                 return level
         return "low"
 

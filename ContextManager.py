@@ -1,33 +1,60 @@
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Callable
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from memory.block import CacheBlock, LongTermBlock
+from memory.config import MemoryConfig
 from memory.longterm import LongTermStore
 from memory.store import ContextStore
 
 
+def _concat_union(a: str, b: str) -> str:
+    """Lossless default union: join two texts, deduplicating exact-duplicate
+    lines while dropping nothing. Keeps the free eval path and tests LLM-free.
+    """
+    seen: set[str] = set()
+    lines: list[str] = []
+    for text in (a, b):
+        for line in text.splitlines():
+            key = line.strip()
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            lines.append(line)
+    return "\n".join(lines)
+
+
 class ContextManager:
     """Primitive memory operations. Exposed to both the algorithmic layer and LLM tools."""
-
-    FIDELITY_REMOVAL_THRESHOLD: ClassVar[float] = 0.50
 
     def __init__(
         self,
         store: ContextStore,
         lt_store: LongTermStore,
         embedding_model: str | SentenceTransformer = "all-MiniLM-L6-v2",
+        config: MemoryConfig | None = None,
+        union_merge_fn: Callable[[str, str], str] | None = None,
     ) -> None:
         self._store = store
         self._lt = lt_store
+        # Default to the store's config so both layers share one source of truth.
+        self._config = config or store.config
         self._embedder = (
             embedding_model
             if isinstance(embedding_model, SentenceTransformer)
             else SentenceTransformer(embedding_model)
         )
+        # Lossless union used to reconcile a divergent context block back into LT.
+        # Default keeps tests / the free eval path LLM-free and never loses info.
+        self._union_merge_fn = union_merge_fn or _concat_union
+
+    @property
+    def config(self) -> MemoryConfig:
+        return self._config
 
     def embed(self, text: str) -> list[float]:
         """Embed text via the owned sentence-transformer model."""
@@ -36,6 +63,10 @@ class ContextManager:
     # ------------------------------------------------------------------
     # Store passthroughs
     # ------------------------------------------------------------------
+
+    @property
+    def used_tokens(self) -> int:
+        return self._store.used_tokens
 
     @property
     def budget_pressure(self) -> str:
@@ -56,13 +87,49 @@ class ContextManager:
         """Add a block to context. Budget management is the caller's responsibility."""
         self._store.add(block)
 
+    def reconcile_to_lt(self, block: CacheBlock, *, refresh_block: bool) -> None:
+        """Lossless-union a divergent (dirty) context block back into its LT copy.
+
+        Invariant: LT holds the highest-fidelity (uncompressed union) copy of any
+        pointered block. Called lazily at the moments a block would otherwise lose
+        the info gained by augment: compress, evict, and (re-)promote.
+
+        No-op when the block has no LT copy or is already clean. When
+        ``refresh_block`` is True (promote path) the union is also written back into
+        the in-context block; otherwise only LT is updated (compress/evict paths).
+        """
+        if block.pointer_to_lt_id is None or not block.dirty:
+            return
+        lt = self._lt.get(block.pointer_to_lt_id)
+        if lt is None:
+            block.dirty = False
+            return
+        union = self._union_merge_fn(lt.content, block.content)
+        emb = self.embed(union)
+        lt.content = union
+        lt.original_embedding = emb
+        lt.fidelity = 1.0
+        lt.compression_count = 0
+        self._lt.update(lt)
+        if refresh_block:
+            block.content = union
+            block.current_embedding = emb
+            block.original_embedding = emb
+            block.fidelity = 1.0
+        block.dirty = False
+
     def augment(
         self,
         block_id: str,
         content: str,
         embedding: list[float],
     ) -> CacheBlock | None:
-        """Replace block content + embedding. Resets fidelity to 1.0."""
+        """Replace block content + embedding. Resets fidelity to 1.0.
+
+        Marks the block dirty: the merged content has gained info not yet in LT.
+        The expensive lossless reconcile is deferred until the block is compressed,
+        evicted, or re-promoted (see reconcile_to_lt).
+        """
         block = self._store.get(block_id)
         if block is None:
             return None
@@ -70,7 +137,10 @@ class ContextManager:
         block.original_embedding = embedding
         block.current_embedding = embedding
         block.fidelity = 1.0
-        self._store.update_priority(block.id)
+        block.dirty = True
+        # A merge is an access: refresh access_count + last_accessed so re-mentioned
+        # facts gain recency/frequency weight (record_access also re-sorts the heap).
+        block.record_access()
         return block
 
     def find_similar(
@@ -101,11 +171,14 @@ class ContextManager:
         if block is None:
             return None
 
-        if block.fidelity < self.FIDELITY_REMOVAL_THRESHOLD:
+        if block.fidelity < self._config.fidelity_removal_threshold:
             self._store.remove(block.id)
             return block
 
         if block.pointer_to_lt_id is None:
+            # First compression pass: copy the current (full, possibly augmented)
+            # content to LT before the lossy summary degrades it. This already
+            # captures any augment, so the block is now clean against LT.
             lt_block = LongTermBlock(
                 content=block.content,
                 original_embedding=block.current_embedding,
@@ -114,10 +187,14 @@ class ContextManager:
                 novelty_score=block.novelty_score,
                 access_count=block.access_count,
                 last_accessed=block.last_accessed,
-                referenced_by=[block.id],
             )
             self._lt.add(lt_block)
             block.pointer_to_lt_id = lt_block.id
+            block.dirty = False
+        elif block.dirty:
+            # Already pointered and augmented since: reconcile the augmented fact
+            # into LT at full fidelity BEFORE this lossy pass degrades it.
+            self.reconcile_to_lt(block, refresh_block=False)
 
         new_embedding = self.embed(compressed_content)
         new_emb = np.array(new_embedding, dtype=np.float32)
@@ -135,7 +212,7 @@ class ContextManager:
         block.fidelity = new_fidelity
         block.compression_count += 1
 
-        if block.fidelity < self.FIDELITY_REMOVAL_THRESHOLD:
+        if block.fidelity < self._config.fidelity_removal_threshold:
             self._store.remove(block.id)
         else:
             self._store.update_priority(block.id)
@@ -158,9 +235,17 @@ class ContextManager:
         )
 
         if stub is not None:
-            stub.content = lt_block.content
-            stub.fidelity = lt_block.fidelity
-            stub.compression_count = lt_block.compression_count
+            if stub.dirty:
+                # Stub gained info since it last synced to LT: union both directions
+                # so neither the stub's nor LT's facts are lost, and expand in context.
+                self.reconcile_to_lt(stub, refresh_block=True)
+            else:
+                stub.content = lt_block.content
+                stub.fidelity = lt_block.fidelity
+                stub.compression_count = lt_block.compression_count
+                # Under the invariant the stub now mirrors LT's content; keep
+                # current_embedding describing it.
+                stub.current_embedding = lt_block.original_embedding
             self._store.update_priority(stub.id)
             self._lt.access(lt_block_id)
             return stub
@@ -168,6 +253,7 @@ class ContextManager:
         block = CacheBlock(
             content=lt_block.content,
             original_embedding=lt_block.original_embedding,
+            current_embedding=lt_block.original_embedding,
             fidelity=lt_block.fidelity,
             compression_count=lt_block.compression_count,
             pointer_to_lt_id=lt_block_id,
@@ -198,6 +284,10 @@ class ContextManager:
             )
             self._lt.add(lt_block)
             block.pointer_to_lt_id = lt_block.id
+        elif block.dirty:
+            # Pointered but augmented since: union the gained info into LT before
+            # removal so eviction never loses it. (Clean pointered: LT already authoritative.)
+            self.reconcile_to_lt(block, refresh_block=False)
 
         self._store.remove(block.id)
         return block

@@ -12,3 +12,6 @@ eval/contexts/
 
 # Stress-test outputs (JSON results, PNG charts)
 eval/results/
+
+# Downloaded eval datasets (redownloadable via eval/datasets/locomo.py)
+eval/data/

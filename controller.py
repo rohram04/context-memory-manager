@@ -1,57 +1,82 @@
 from __future__ import annotations
 
-from typing import Callable, ClassVar
+from typing import Callable
 
 from ContextManager import ContextManager
 from memory.block import CacheBlock
+from memory.clock import CLOCK
+from memory.config import MemoryConfig
 
 
 class MemoryController:
     """Algorithmic scheduling layer built on top of ContextManager primitives."""
-
-    PROMOTE_ALPHA: ClassVar[float] = 0.7
-    PROMOTE_BETA: ClassVar[float] = 0.3
-    PROMOTE_THRESHOLD: ClassVar[float] = 0.6
 
     def __init__(
         self,
         context_manager: ContextManager,
         compress_fn: Callable[[str], str],
         merge_fn: Callable[[str, str], tuple[str, list[float]]],
+        config: MemoryConfig | None = None,
     ) -> None:
         self._cm = context_manager
         self._compress_fn = compress_fn
         self._merge_fn = merge_fn
+        self._config = config or context_manager.config
+        # Configure the shared decay clock for this run: wall-clock by default,
+        # or a deterministic per-turn simulated clock when clock_seconds_per_turn > 0.
+        CLOCK.reset(self._config.clock_seconds_per_turn)
 
     # ------------------------------------------------------------------
     # Algorithmic scheduling
     # ------------------------------------------------------------------
 
     def compression_tick(self) -> CacheBlock | None:
-        """Pick the highest-priority candidate and compress it."""
+        """Pick the highest-priority candidate and compress it.
+
+        An empty compress_fn result is the model's 'cannot_compress' signal: evict the
+        block to LT instead of replacing its content with nothing.
+        """
         block = self._cm.next_candidate()
         if block is None:
             return None
         compressed = self._compress_fn(block.content)
+        if not compressed.strip():
+            return self._cm.evict(block.id)
         return self._cm.compress(block.id, compressed)
 
     def fit_budget(self) -> None:
-        """Compress candidates until context is within token budget."""
+        """Compress candidates until context is within token budget.
+
+        Each iteration must make progress (shrink or drop a block) or the loop cannot
+        terminate: next_candidate() always returns a block while the store is non-empty,
+        and a faithful summary of an already-short block neither shrinks it nor drops its
+        fidelity below the removal threshold. So we evict the candidate to LT when either
+        the model signals cannot_compress (empty result) OR the compression pass did not
+        reduce used_tokens. Evicted blocks stay retrievable via the long-term store.
+        """
         while self._cm.budget_fraction > 1.0:
-            compressed_block = self.compression_tick()
-            if compressed_block is None:
+            candidate = self._cm.next_candidate()
+            if candidate is None:
                 break
+            before = self._cm.used_tokens
+            compressed = self._compress_fn(candidate.content)
+            if compressed.strip():
+                self._cm.compress(candidate.id, compressed)
+            if candidate.id in self._cm._store and self._cm.used_tokens >= before:
+                self._cm.evict(candidate.id)
 
     def pre_prompt_promote(
         self,
         query_vec: list[float],
-        top_k: int = 5,
+        top_k: int | None = None,
     ) -> list[CacheBlock]:
         """Similarity-search LT and promote high-scoring blocks into context."""
+        cfg = self._config
+        k = cfg.promote_top_k if top_k is None else top_k
         promoted = []
-        for lt_block, similarity in self._cm._lt.similarity_search(query_vec, top_k):
-            score = self.PROMOTE_ALPHA * similarity + self.PROMOTE_BETA * lt_block.decay_score
-            if score >= self.PROMOTE_THRESHOLD:
+        for lt_block, similarity in self._cm._lt.similarity_search(query_vec, k):
+            score = cfg.promote_alpha * similarity + cfg.promote_beta * lt_block.decay_score
+            if score >= cfg.promote_threshold:
                 block = self._cm.promote(lt_block.id)
                 if block is not None:
                     promoted.append(block)
@@ -62,10 +87,15 @@ class MemoryController:
         content: str,
         embedding: list[float],
         novelty_score: float,
-        similarity_threshold: float = 0.85,
+        similarity_threshold: float | None = None,
     ) -> CacheBlock:
         """Find a similar block and merge into it, or insert as a new block."""
-        existing = self._cm.find_similar(embedding, similarity_threshold)
+        threshold = (
+            self._config.augment_similarity_threshold
+            if similarity_threshold is None
+            else similarity_threshold
+        )
+        existing = self._cm.find_similar(embedding, threshold)
         if existing is not None:
             merged_content, merged_embedding = self._merge_fn(existing.content, content)
             return self._cm.augment(existing.id, merged_content, merged_embedding)
@@ -87,14 +117,16 @@ class MemoryController:
         content: str,
         embedding: list[float],
         novelty_score: float,
-        top_k: int = 5,
-        similarity_threshold: float = 0.85,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
     ) -> CacheBlock:
         """Promote relevant LT blocks, insert or augment, then fit budget.
 
         Caller is responsible for computing `embedding` once and passing it in
         (it's also used to score novelty upstream, so we don't re-embed here).
+        Advances the logical clock by one turn (no-op under wall-clock mode).
         """
+        CLOCK.tick()
         self.pre_prompt_promote(embedding, top_k)
         block = self.insert_or_augment(content, embedding, novelty_score, similarity_threshold)
         self.fit_budget()

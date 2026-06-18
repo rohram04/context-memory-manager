@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import struct
 from datetime import datetime, timezone
 from typing import Any
@@ -9,6 +8,7 @@ import numpy as np
 from sqlalchemy import create_engine, text
 
 from memory.block import LongTermBlock
+from memory.clock import CLOCK
 
 UTC = timezone.utc
 
@@ -77,7 +77,6 @@ class LongTermStore:
                         last_accessed      TEXT,
                         created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
                         is_reconstructed   INTEGER NOT NULL DEFAULT 0,
-                        referenced_by      TEXT    NOT NULL DEFAULT '[]',
                         original_embedding BLOB
                     )
                 """))
@@ -94,7 +93,6 @@ class LongTermStore:
                         last_accessed      TIMESTAMPTZ,
                         created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
                         is_reconstructed   BOOLEAN NOT NULL DEFAULT FALSE,
-                        referenced_by      TEXT    NOT NULL DEFAULT '[]',
                         original_embedding vector({self._embedding_dim})
                     )
                 """))
@@ -116,7 +114,6 @@ class LongTermStore:
             "compression_count": block.compression_count,
             "novelty_score": block.novelty_score,
             "access_count": block.access_count,
-            "referenced_by": json.dumps(block.referenced_by),
         }
         if self._dialect == "sqlite":
             return {
@@ -137,7 +134,7 @@ class LongTermStore:
         if isinstance(last_accessed, str):
             last_accessed = datetime.fromisoformat(last_accessed)
         if last_accessed is None:
-            last_accessed = datetime.now(UTC)
+            last_accessed = CLOCK.now()
         if last_accessed.tzinfo is None:
             last_accessed = last_accessed.replace(tzinfo=UTC)
 
@@ -156,7 +153,6 @@ class LongTermStore:
             access_count=row["access_count"],
             last_accessed=last_accessed,
             is_reconstructed=is_reconstructed,
-            referenced_by=json.loads(row.get("referenced_by") or "[]"),
             original_embedding=original_embedding,
         )
 
@@ -170,11 +166,11 @@ class LongTermStore:
             conn.execute(text("""
                 INSERT INTO lt_blocks
                     (id, content, fidelity, compression_count, novelty_score,
-                     access_count, last_accessed, is_reconstructed, referenced_by,
+                     access_count, last_accessed, is_reconstructed,
                      original_embedding)
                 VALUES
                     (:id, :content, :fidelity, :compression_count, :novelty_score,
-                     :access_count, :last_accessed, :is_reconstructed, :referenced_by,
+                     :access_count, :last_accessed, :is_reconstructed,
                      :original_embedding)
             """), row)
             conn.commit()
@@ -195,7 +191,7 @@ class LongTermStore:
                     content=:content, fidelity=:fidelity,
                     compression_count=:compression_count, novelty_score=:novelty_score,
                     access_count=:access_count, last_accessed=:last_accessed,
-                    is_reconstructed=:is_reconstructed, referenced_by=:referenced_by,
+                    is_reconstructed=:is_reconstructed,
                     original_embedding=:original_embedding
                 WHERE id=:id
             """), row)
@@ -267,32 +263,6 @@ class LongTermStore:
                 LIMIT :k
             """), {"vec": _pg_vec_str(query_vec), "k": top_k}).mappings().all()
         return [(self._from_row(dict(r)), float(r["similarity"])) for r in rows]
-
-    # ------------------------------------------------------------------
-    # Reference tracking
-    # ------------------------------------------------------------------
-
-    def add_reference(self, lt_id: str, cb_id: str) -> None:
-        block = self.get(lt_id)
-        if block is not None and cb_id not in block.referenced_by:
-            block.referenced_by.append(cb_id)
-            with self._engine.connect() as conn:
-                conn.execute(
-                    text("UPDATE lt_blocks SET referenced_by=:ref WHERE id=:id"),
-                    {"id": lt_id, "ref": json.dumps(block.referenced_by)},
-                )
-                conn.commit()
-
-    def remove_reference(self, lt_id: str, cb_id: str) -> None:
-        block = self.get(lt_id)
-        if block is not None and cb_id in block.referenced_by:
-            block.referenced_by.remove(cb_id)
-            with self._engine.connect() as conn:
-                conn.execute(
-                    text("UPDATE lt_blocks SET referenced_by=:ref WHERE id=:id"),
-                    {"id": lt_id, "ref": json.dumps(block.referenced_by)},
-                )
-                conn.commit()
 
     # ------------------------------------------------------------------
     # Introspection

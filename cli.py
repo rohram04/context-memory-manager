@@ -10,6 +10,7 @@ from agent import Agent, MemoryMode
 from ContextManager import ContextManager
 from controller import MemoryController
 from functions.llm_fns import make_compress_fn, make_merge_fn
+from llm_client import OPENROUTER_HAIKU, OPENROUTER_SONNET, has_llm_key, make_anthropic_client
 from memory.longterm import LongTermStore
 from memory.novelty import NoveltyMode
 from memory.store import ContextStore
@@ -48,7 +49,8 @@ interactive commands:
   /quit     exit
 
 env:
-  ANTHROPIC_API_KEY   required.
+  OPENROUTER_API_KEY or ANTHROPIC_API_KEY   one required (routes via OpenRouter
+                      when the OpenRouter key is set). Neither needed with --local.
 
 examples:
   python cli.py                                  # algorithmic mode, tiny budget
@@ -80,14 +82,15 @@ examples:
     )
     parser.add_argument(
         "--model",
-        default="claude-sonnet-4-6",
-        help="Anthropic model for the main conversation turns. Default: claude-sonnet-4-6.",
+        default=OPENROUTER_SONNET,
+        help=f"Model for the main conversation turns. Default: {OPENROUTER_SONNET} "
+        "(via OpenRouter when OPENROUTER_API_KEY is set).",
     )
     parser.add_argument(
         "--util-model",
-        default="claude-haiku-4-5-20251001",
+        default=OPENROUTER_HAIKU,
         help="Cheaper model used for compression summaries, block merges, and "
-        "(when --novelty is llm/hybrid) novelty scoring. Default: claude-haiku-4-5-20251001.",
+        f"(when --novelty is llm/hybrid) novelty scoring. Default: {OPENROUTER_HAIKU}.",
     )
     parser.add_argument(
         "--db",
@@ -132,10 +135,10 @@ examples:
         args.model = args.local_model
         args.util_model = args.local_model
     else:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("Error: ANTHROPIC_API_KEY is not set.", file=sys.stderr)
+        if not has_llm_key():
+            print("Error: no LLM key set (OPENROUTER_API_KEY or ANTHROPIC_API_KEY).", file=sys.stderr)
             sys.exit(1)
-        client = anthropic.Anthropic()
+        client = make_anthropic_client()
 
     store = ContextStore(max_tokens=args.max_tokens)
     lt_store = LongTermStore(args.db)

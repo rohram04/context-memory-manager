@@ -42,10 +42,9 @@ Rules:
 
 
 def _extract_text(content: list) -> str:
-    for block in content:
-        if hasattr(block, "text"):
-            return block.text
-    return ""
+    """Concatenate every text block in a response (text can be split across
+    multiple blocks when interleaved with tool_use); empty string if none."""
+    return "".join(block.text for block in content if hasattr(block, "text"))
 
 
 class Agent:

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import ClassVar
 from uuid import uuid4
 
 import tiktoken
 from pydantic import BaseModel, ConfigDict, computed_field, Field, model_validator
 
-_enc = tiktoken.get_encoding("cl100k_base")
+from memory.clock import CLOCK, UTC
 
-UTC = timezone.utc
+_enc = tiktoken.get_encoding("cl100k_base")
 
 
 class CacheBlock(BaseModel):
@@ -27,7 +27,8 @@ class CacheBlock(BaseModel):
     pointer_to_lt_id: str | None = None
     novelty_score: float
     access_count: int = 0
-    last_accessed: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_accessed: datetime = Field(default_factory=lambda: CLOCK.now())
+    dirty: bool = False  # content gained info not yet reconciled to LT
 
     @model_validator(mode="after")
     def _default_current_embedding(self) -> "CacheBlock":
@@ -43,12 +44,12 @@ class CacheBlock(BaseModel):
     @computed_field
     @property
     def decay_score(self) -> float:
-        delta = (datetime.now(UTC) - self.last_accessed).total_seconds()
+        delta = (CLOCK.now() - self.last_accessed).total_seconds()
         return math.exp(-delta / self.DECAY_CONSTANT_S)
 
     def record_access(self) -> None:
         self.access_count += 1
-        self.last_accessed = datetime.now(UTC)
+        self.last_accessed = CLOCK.now()
 
 
 class LongTermBlock(BaseModel):
@@ -63,16 +64,15 @@ class LongTermBlock(BaseModel):
     compression_count: int = 0
     novelty_score: float
     access_count: int = 0
-    last_accessed: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    referenced_by: list[str] = Field(default_factory=list)
+    last_accessed: datetime = Field(default_factory=lambda: CLOCK.now())
     is_reconstructed: bool = False
 
     @computed_field
     @property
     def decay_score(self) -> float:
-        delta = (datetime.now(UTC) - self.last_accessed).total_seconds()
+        delta = (CLOCK.now() - self.last_accessed).total_seconds()
         return math.exp(-delta / self.DECAY_CONSTANT_S)
 
     def record_access(self) -> None:
         self.access_count += 1
-        self.last_accessed = datetime.now(UTC)
+        self.last_accessed = CLOCK.now()
