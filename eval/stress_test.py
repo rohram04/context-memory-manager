@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import tiktoken
 from sentence_transformers import SentenceTransformer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -117,13 +118,23 @@ def generate_needles(n: int, seed: int) -> list[dict[str, str]]:
     return needles
 
 
-def generate_distractors(n: int, seed: int) -> list[str]:
+def generate_distractors(n: int, seed: int, pad_to_tokens: int = 0) -> list[str]:
     rng = random.Random(seed + 1)
+
+    def _filled() -> str:
+        template = rng.choice(_DISTRACTOR_TEMPLATES)
+        return template.format(**{k: rng.choice(v) for k, v in _FILL.items()})
+
     out = []
     for _ in range(n):
-        template = rng.choice(_DISTRACTOR_TEMPLATES)
-        filled = template.format(**{k: rng.choice(v) for k, v in _FILL.items()})
-        out.append(filled)
+        text = _filled()
+        # Optionally pad with extra neutral sentences until the distractor reaches
+        # ~pad_to_tokens tokens. Lets the stream overflow a large context window with
+        # far fewer items (cheaper Letta runs); padded text stays low-novelty by
+        # construction (same templates as the rest of the distractor stream).
+        while pad_to_tokens > 0 and len(_ENC.encode(text)) < pad_to_tokens:
+            text += " " + _filled()
+        out.append(text)
     return out
 
 
@@ -134,22 +145,17 @@ def interleave(needles: list[dict], distractors: list[str], seed: int) -> list[d
     items: list[dict | None] = [None] * total
 
     if needles:
-        # Even-ish positions, then jitter slightly to avoid hitting exactly the
-        # same slots every trial.
+        # Even-ish target positions with slight jitter so slots vary per trial.
+        # Resolve collisions by walking forward to the next free slot so EVERY
+        # needle is placed (a deduped set would silently drop colliding needles,
+        # leaving fewer than `len(distractors)` free slots and unrecallable needles).
         step = total / len(needles)
-        positions = sorted({
-            min(total - 1, max(0, int(i * step + rng.uniform(0, step * 0.5))))
-            for i in range(len(needles))
-        })
-        # Fill any collisions by shifting forward.
-        used = set()
-        adjusted = []
-        for p in positions:
-            while p in used and p < total - 1:
-                p += 1
-            used.add(p)
-            adjusted.append(p)
-        for pos, needle in zip(adjusted, needles):
+        used: set[int] = set()
+        for i, needle in enumerate(needles):
+            pos = min(total - 1, max(0, int(i * step + rng.uniform(0, step * 0.5))))
+            while pos in used:
+                pos = (pos + 1) % total
+            used.add(pos)
             items[pos] = {
                 "kind": "needle",
                 "content": needle["content"],
@@ -157,16 +163,201 @@ def interleave(needles: list[dict], distractors: list[str], seed: int) -> list[d
                 "stream_pos": pos,
             }
 
+    # Free slots now equal len(distractors) exactly, but default defensively so a
+    # short distractor list can never raise StopIteration mid-build.
     distractor_iter = iter(distractors)
     for i in range(total):
         if items[i] is None:
             items[i] = {
                 "kind": "distractor",
-                "content": next(distractor_iter),
+                "content": next(distractor_iter, _FILLER),
                 "needle": None,
                 "stream_pos": i,
             }
     return items  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Part B — tiered facts (varying novelty + re-access) for recall_advantage.py
+# ---------------------------------------------------------------------------
+
+
+_HIGH_FINDINGS = [
+    "arctic terns migrate across the Aral basin in a previously unrecorded loop",
+    "an anomalous magnetic reversal sits beneath the Kerguelen plateau",
+    "a self-sealing alloy forms only under deep-mantle pressure",
+    "a whistled dialect survives in two Canarian villages",
+    "a fungus fixes nitrogen in glacial meltwater",
+    "a misattributed fresco hides behind a Ravenna altarpiece",
+    "a tidal resonance doubles wave height in the Bay of Cambay",
+    "a comet fragment carries an unexpectedly high deuterium ratio",
+    "a margin cipher was used by 14th-century Genoese traders",
+    "a coral species calcifies fastest in near-freezing water",
+    "a basalt column field rings audibly at dawn near Vík",
+    "a salt-tolerant wheat strain was bred on the Aral shore",
+]
+
+# Varied sentence frames so high-tier facts don't cluster by structure (which
+# would cause retrieval cross-talk). Each fact gets a UNIQUE codename anchor that
+# dominates its embedding and that its query quotes verbatim.
+_HIGH_FRAMES = [
+    "{anchor} confirmed that {finding}; its sealed archive reference is {token}.",
+    "{anchor} is the codename under which {finding}; catalogued as reference {token}.",
+    "Investigators on {anchor} found that {finding}. Archive reference: {token}.",
+    "Under the {anchor} initiative it was logged that {finding}, reference {token}.",
+]
+
+_CODE_ADJ = ["Crimson", "Hollow", "Azure", "Granite", "Tidal", "Ashen", "Verdant",
+             "Cobalt", "Umber", "Saffron", "Onyx", "Pewter"]
+_CODE_NOUN = ["Lantern", "Meridian", "Falcon", "Cascade", "Quarry", "Beacon",
+              "Lattice", "Harbor", "Ember", "Compass", "Thicket", "Anvil"]
+
+
+def generate_tiered_facts(n: int, seed: int) -> list[dict]:
+    """Facts split into high- vs low-novelty tiers, some flagged for re-access.
+
+    - high tier: distinct, surprising statements with varied sentence frames
+                 (embedding-novel, and mutually dissimilar to avoid retrieval
+                 cross-talk).
+    - low tier:  formulaic 'log unit' reminders resembling the distractor stream,
+                 so the embedding novelty scorer rates them low.
+    Every fact carries a UNIQUE codename anchor (quoted by its query) and a unique
+    opaque token (the recall target; never present in the query).
+    """
+    rng = random.Random(seed + 7)
+    # Unique two-word codenames as retrieval anchors.
+    anchors = list({f"{a} {b}" for a in _CODE_ADJ for b in _CODE_NOUN})
+    rng.shuffle(anchors)
+    findings = list(_HIGH_FINDINGS)
+    rng.shuffle(findings)
+
+    facts: list[dict] = []
+    for i in range(n):
+        token = _rand_token(rng)
+        tier = "high" if i % 2 == 0 else "low"
+        if tier == "high":
+            anchor = f"Project {anchors[i % len(anchors)]}"
+            finding = findings[i % len(findings)]
+            frame = _HIGH_FRAMES[i % len(_HIGH_FRAMES)]
+            content = frame.format(anchor=anchor, finding=finding, token=token)
+            query = f"What is the archive reference for {anchor}?"
+        else:
+            anchor = f"log unit {anchors[i % len(anchors)]}"
+            content = f"Reminder: {anchor} uses backup access code {token}."
+            query = f"What backup access code does {anchor} use?"
+        facts.append({
+            "needle_id": f"fact_{i:03d}",
+            "name": anchor,
+            "unique_token": token,
+            "content": content,
+            "query": query,
+            "novelty_tier": tier,
+            "reaccessed": (i % 3 == 0),
+        })
+    return facts
+
+
+_ENC = tiktoken.get_encoding("cl100k_base")  # matches memory/block.py token_cost
+_FILLER = "Routine log entry: nothing of note recorded this cycle."
+
+
+def _tok(text: str) -> int:
+    return len(_ENC.encode(text))
+
+
+def _place_one(items, entry, lo, hi, rng, kind) -> bool:
+    """Place one entry in a free slot within [lo, hi); fall back to any free slot.
+
+    The band is only a *placement hint*: bucketing is recomputed from each item's
+    exact ``tokens_after`` once the stream is built, so an entry that has to fall
+    back to a different region is still reported in the band it truly lands in.
+    Returns True if placed.
+    """
+    n = len(items)
+    lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
+    free = [i for i in range(lo, hi) if items[i] is None]
+    if not free:
+        free = [i for i in range(n) if items[i] is None]  # fallback: anywhere
+    if not free:
+        return False
+    slot = rng.choice(free)
+    items[slot] = {"kind": kind, "content": entry["content"], "fact": entry,
+                   "stream_pos": slot}
+    return True
+
+
+def interleave_tiered(
+    facts: list[dict],
+    distractors: list[str],
+    seed: int,
+    max_tokens: int,
+) -> list[dict]:
+    """Place fact mentions by token-distance from the end-of-stream probe, relative
+    to the context window ``max_tokens`` (W), so the eviction gradient the test
+    claims to measure actually exists.
+
+    Bands, by tokens arriving AFTER a fact's first mention:
+      - recent : ``< W``     -> survives in both systems (control / ceiling)
+      - mid    : ``[W, 2W)`` -> FIFO evicts; ours should retain high-novelty
+      - far    : ``>= 2W``   -> strongly evicted by FIFO
+
+    Single-mention facts are spread across all three bands so each has a
+    control / at-risk population. Re-accessed facts get their first mention in the
+    far region and a re-mention in the recent band, guaranteeing a first->re gap
+    that exceeds W, so the access-frequency rescue path is genuinely exercised (the
+    original block can be evicted before the re-mention arrives).
+
+    The stream must overflow the window for the far/mid bands to be populated; a
+    warning is printed if total stream tokens < 2W.
+    """
+    rng = random.Random(seed + 3)
+    rements = [f for f in facts if f["reaccessed"]]
+    total = len(facts) + len(distractors) + len(rements)
+    items: list[dict | None] = [None] * total
+
+    # Locate band boundaries in *item* space via the average item size; exact
+    # token distances are measured after the stream is assembled (see below).
+    sample = [f["content"] for f in facts] + list(distractors)
+    avg_tok = max(1.0, sum(_tok(s) for s in sample) / max(1, len(sample)))
+    w_items = max(1, round(max_tokens / avg_tok))  # ~items that fit in W
+    recent_lo = max(0, total - w_items)            # recent band: [recent_lo, total)
+    mid_lo = max(0, total - 2 * w_items)           # mid band:    [mid_lo, recent_lo)
+    bands = [(recent_lo, total), (mid_lo, recent_lo), (0, mid_lo)]  # recent/mid/far
+
+    single = [f for f in facts if not f["reaccessed"]]
+    reaccessed = [f for f in facts if f["reaccessed"]]
+
+    # Single-mention facts: round-robin across the three bands.
+    for i, f in enumerate(single):
+        lo, hi = bands[i % len(bands)]
+        _place_one(items, f, lo, hi, rng, "fact")
+
+    # Re-accessed facts: first mention in the far region, re-mention recent.
+    for f in reaccessed:
+        _place_one(items, f, 0, mid_lo, rng, "fact")
+        _place_one(items, f, recent_lo, total, rng, "rement")
+
+    # Fill remaining slots with distractors (defensive default if the iterator
+    # runs short on a sparse zone).
+    distractor_iter = iter(distractors)
+    for i in range(total):
+        if items[i] is None:
+            items[i] = {"kind": "distractor", "content": next(distractor_iter, _FILLER),
+                        "fact": None, "stream_pos": i}
+
+    built: list[dict] = items  # type: ignore[assignment]
+
+    # Attach exact token-distance-from-end so bucketing is precise regardless of
+    # per-item token variance.
+    suffix = 0
+    for it in reversed(built):
+        it["tokens_after"] = suffix
+        suffix += _tok(it["content"])
+    if suffix < 2 * max_tokens:
+        print(f"[interleave_tiered] WARNING: stream ~{suffix} tok < 2*W "
+              f"({2 * max_tokens}); far/mid bands may be sparse — add distractors "
+              f"or lower --max-tokens for a meaningful overflow test.", flush=True)
+    return built
 
 
 # ---------------------------------------------------------------------------
