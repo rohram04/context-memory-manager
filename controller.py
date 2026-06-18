@@ -17,10 +17,15 @@ class MemoryController:
         compress_fn: Callable[[str], str],
         merge_fn: Callable[[str, str], tuple[str, list[float]]],
         config: MemoryConfig | None = None,
+        augment_decision_fn: Callable[[str, list[tuple[str, str]]], str | None] | None = None,
     ) -> None:
         self._cm = context_manager
         self._compress_fn = compress_fn
         self._merge_fn = merge_fn
+        # Optional LLM judge for augmentation. When set (and config.llm_augment_decision),
+        # it decides augment-vs-insert over the top-k similar candidates instead of a
+        # fixed cosine cutoff. Falls back to the cosine path when None.
+        self._augment_decision_fn = augment_decision_fn
         self._config = config or context_manager.config
         # Configure the shared decay clock for this run: wall-clock by default,
         # or a deterministic per-turn simulated clock when clock_seconds_per_turn > 0.
@@ -89,17 +94,45 @@ class MemoryController:
         novelty_score: float,
         similarity_threshold: float | None = None,
     ) -> CacheBlock:
-        """Find a similar block and merge into it, or insert as a new block."""
+        """Merge into a similar block, or insert as a new block.
+
+        LLM-judged path (default, when an augment_decision_fn is injected): retrieve the
+        top-k similar in-context blocks above a low floor and let the LLM decide whether
+        the content belongs to one of them or is a distinct topic. Otherwise fall back to
+        the fixed cosine-threshold path.
+        """
+        cfg = self._config
+        if cfg.llm_augment_decision and self._augment_decision_fn is not None:
+            candidates = self._cm.find_top_k(
+                embedding, cfg.augment_candidate_top_k, cfg.augment_candidate_floor
+            )
+            if candidates:
+                by_id = {block.id: block for block, _ in candidates}
+                chosen_id = self._augment_decision_fn(
+                    content, [(block.id, block.content) for block, _ in candidates]
+                )
+                existing = by_id.get(chosen_id) if chosen_id else None
+                if existing is not None:
+                    return self._augment_into(existing, content)
+            return self._insert_new(content, embedding, novelty_score)
+
         threshold = (
-            self._config.augment_similarity_threshold
+            cfg.augment_similarity_threshold
             if similarity_threshold is None
             else similarity_threshold
         )
         existing = self._cm.find_similar(embedding, threshold)
         if existing is not None:
-            merged_content, merged_embedding = self._merge_fn(existing.content, content)
-            return self._cm.augment(existing.id, merged_content, merged_embedding)
+            return self._augment_into(existing, content)
+        return self._insert_new(content, embedding, novelty_score)
 
+    def _augment_into(self, existing: CacheBlock, content: str) -> CacheBlock:
+        merged_content, merged_embedding = self._merge_fn(existing.content, content)
+        return self._cm.augment(existing.id, merged_content, merged_embedding)
+
+    def _insert_new(
+        self, content: str, embedding: list[float], novelty_score: float
+    ) -> CacheBlock:
         block = CacheBlock(
             content=content,
             original_embedding=embedding,

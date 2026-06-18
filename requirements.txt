@@ -7,3 +7,6 @@ anthropic
 sentence-transformers
 litellm[proxy]
 letta-client>=1.0  # optional: eval/niah_live.py Letta baseline
+fastapi              # demo backend (demo/backend/server.py)
+uvicorn              # demo backend ASGI server
+itsdangerous         # Starlette SessionMiddleware cookie signing (demo backend)

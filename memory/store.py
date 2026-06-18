@@ -135,3 +135,31 @@ class ContextStore:
                 best_sim = sim
                 best_block = block
         return best_block if best_sim >= threshold else None
+
+    def find_top_k(
+        self, query_embedding: list[float], k: int = 3, min_sim: float = 0.0
+    ) -> list[tuple[CacheBlock, float]]:
+        """Top-k context blocks by cosine vs query, each >= min_sim, highest first.
+
+        Used to build the candidate set for LLM-judged augmentation. Simple O(n)
+        scan + sort over original_embedding (the same field find_similar compares).
+        """
+        if not query_embedding:
+            return []
+        q = np.array(query_embedding, dtype=np.float32)
+        q_norm = float(np.linalg.norm(q))
+        if q_norm == 0:
+            return []
+        scored: list[tuple[CacheBlock, float]] = []
+        for block in self._blocks.values():
+            if not block.original_embedding:
+                continue
+            v = np.array(block.original_embedding, dtype=np.float32)
+            v_norm = float(np.linalg.norm(v))
+            if v_norm == 0:
+                continue
+            sim = float(np.dot(q, v) / (q_norm * v_norm))
+            if sim >= min_sim:
+                scored.append((block, sim))
+        scored.sort(key=lambda t: t[1], reverse=True)
+        return scored[:k]

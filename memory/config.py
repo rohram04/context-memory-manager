@@ -33,7 +33,18 @@ class MemoryConfig:
     promote_threshold: float = 0.6
 
     # --- augmentation / similarity (controller + store.find_similar) --------
+    # Fallback cosine cutoff used only when LLM-judged augmentation is disabled.
     augment_similarity_threshold: float = 0.85
+    # LLM-judged augmentation: surface the top-k most similar in-context blocks to a
+    # cheap util-model that decides whether the incoming content is about the SAME
+    # subject (augment into one) or a distinct topic (insert new). Robust where a
+    # single cosine threshold is not: same-vs-different entity with similar wording.
+    # Default ON; requires controller to be given an augment_decision_fn.
+    llm_augment_decision: bool = True
+    # Low cosine floor that forms the candidate set for the LLM judge (and lets us
+    # skip the LLM call entirely when nothing is even plausibly related ~0.0).
+    augment_candidate_floor: float = 0.4
+    augment_candidate_top_k: int = 3
 
     # --- novelty scoring (memory/novelty.py) --------------------------------
     novelty_top_k: int = 5

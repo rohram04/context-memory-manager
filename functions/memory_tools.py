@@ -20,9 +20,11 @@ class MemoryTools:
             "name": "store",
             "description": (
                 "Create a new memory block with the given content. "
-                "Use this to persist information you want to remember across turns. "
-                "Set novelty high (close to 1.0) for unique or surprising information, "
-                "low (close to 0.0) for routine or redundant information."
+                "Call this only when no existing context block covers the same topic — "
+                "check MEMORY BLOCKS first and prefer augment() if a related block exists. "
+                "Set novelty high (close to 1.0) for unique, surprising, or critical information; "
+                "low (close to 0.0) for routine or redundant information. "
+                "You may call this multiple times in one turn to persist several distinct facts."
             ),
             "input_schema": {
                 "type": "object",
@@ -43,10 +45,14 @@ class MemoryTools:
             "name": "compress",
             "description": (
                 "Compress a context block to reduce its token cost. "
-                "Write a summary of the block as compressed_content — "
-                "the full block content is shown in MEMORY STATUS. "
-                "If fidelity drops below threshold after compression the block is removed from "
-                "context (long-term copy preserved, recoverable via promote or query_lt)."
+                "Call this when budget pressure is medium or higher, targeting low-novelty "
+                "or low-decay blocks first (both shown in MEMORY BLOCKS). "
+                "Read the block's current content from MEMORY BLOCKS, write your own concise "
+                "summary as compressed_content (it must be SHORTER than the current content), "
+                "and omit details that are no longer relevant. 'Fidelity' (shown in MEMORY "
+                "BLOCKS) measures how much of the original meaning survives; if it drops below "
+                "~0.5 after a pass the block is removed from context (long-term copy preserved, "
+                "recoverable via promote or query_lt). You may compress multiple blocks in one turn."
             ),
             "input_schema": {
                 "type": "object",
@@ -57,7 +63,10 @@ class MemoryTools:
                     },
                     "compressed_content": {
                         "type": "string",
-                        "description": "Your summary of the block content.",
+                        "description": (
+                            "Your concise summary of the block's current content — must be "
+                            "shorter than it currently is."
+                        ),
                     },
                 },
                 "required": ["block_id", "compressed_content"],
@@ -67,7 +76,11 @@ class MemoryTools:
             "name": "evict",
             "description": (
                 "Immediately move a context block to long-term memory without compressing it. "
-                "Use when a block is unlikely to be needed soon and you want to free token budget."
+                "Call this when budget pressure is high or critical and a block has low decay "
+                "(not accessed recently) and is unlikely to be needed in the next few turns. "
+                "Prefer evict over compress when you want to remove the block entirely rather "
+                "than keep a stub; evicted blocks remain recoverable via query_lt + promote. "
+                "You may evict multiple blocks in one turn."
             ),
             "input_schema": {
                 "type": "object",
@@ -84,7 +97,10 @@ class MemoryTools:
             "name": "promote",
             "description": (
                 "Promote a long-term memory block back into the active context window. "
-                "If the block already has a stub in context, the stub is expanded in place."
+                "Call this when the user's question or the current task relates to information "
+                "that is currently in long-term memory (use query_lt first to find candidate IDs). "
+                "If the block already has a stub in context, the stub is expanded in place. "
+                "You may promote multiple blocks in one turn."
             ),
             "input_schema": {
                 "type": "object",
@@ -101,9 +117,13 @@ class MemoryTools:
             "name": "augment",
             "description": (
                 "Replace an existing context block's content with a new merged version. "
-                "Write the complete merged result in new_content — combine what the block "
-                "currently says with the new information into a single coherent block. "
-                "The block's embedding is reset and fidelity restored to 1.0."
+                "Call this whenever new information relates to a topic already covered by a "
+                "context block — prefer this over store() to avoid duplicate blocks. "
+                "Read the block's current content from MEMORY BLOCKS, then write the complete "
+                "merged result in new_content: integrate the existing facts and the new "
+                "information into one coherent block, dropping anything superseded. "
+                "Do not concatenate — synthesize. The block's embedding and fidelity are reset. "
+                "You may augment multiple blocks in one turn."
             ),
             "input_schema": {
                 "type": "object",
@@ -114,7 +134,7 @@ class MemoryTools:
                     },
                     "new_content": {
                         "type": "string",
-                        "description": "The complete merged content for the block.",
+                        "description": "The complete merged content for the block (not an append — a full rewrite).",
                     },
                 },
                 "required": ["block_id", "new_content"],
@@ -124,8 +144,10 @@ class MemoryTools:
             "name": "query_lt",
             "description": (
                 "Search long-term memory by semantic similarity to a natural language query. "
-                "Returns the top matching blocks with their metadata. "
-                "Use this to check whether relevant information exists in LT before promoting."
+                "Call this at the start of each turn to check whether the user's question or "
+                "the current topic has relevant information in long-term storage. "
+                "If results look useful, follow up with promote() to bring them into context. "
+                "Returns the top matching blocks with IDs, similarity scores, and content previews."
             ),
             "input_schema": {
                 "type": "object",
@@ -145,9 +167,12 @@ class MemoryTools:
         {
             "name": "update_novelty",
             "description": (
-                "Set the novelty score for a context block. Higher novelty (closer to 1.0) "
-                "makes the block resist compression; lower novelty (closer to 0.0) makes it "
-                "compress sooner. Use when new information changes how significant a block is."
+                "Set the novelty score for a context block. "
+                "Call this when new information reveals that an existing block is more or less "
+                "significant than originally scored — for example, a fact that seemed routine "
+                "turns out to be a key constraint, or a previously surprising fact becomes stale. "
+                "Higher novelty (closer to 1.0) makes the block resist compression; "
+                "lower novelty (closer to 0.0) lets it compress sooner."
             ),
             "input_schema": {
                 "type": "object",

@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 from memory.block import LongTermBlock
 from memory.clock import CLOCK
@@ -54,6 +55,12 @@ class LongTermStore:
         kwargs: dict[str, Any] = {}
         if url.startswith("sqlite"):
             kwargs["connect_args"] = {"check_same_thread": False}
+            # An in-memory sqlite DB lives inside a single connection; with the
+            # default pool each connection gets its own empty DB. StaticPool keeps
+            # one shared connection so the schema/data persist across threadpool
+            # workers (the demo serves sync endpoints from a threadpool).
+            if ":memory:" in url:
+                kwargs["poolclass"] = StaticPool
         self._engine = create_engine(url, **kwargs)
         self._dialect = self._engine.dialect.name
         self._embedding_dim = embedding_dim

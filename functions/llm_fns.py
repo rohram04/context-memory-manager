@@ -122,6 +122,85 @@ def make_merge_fn(
     return merge
 
 
+_AUGMENT_DECISION_TOOLS = [
+    {
+        "name": "augment_into",
+        "description": (
+            "The new information is about the SAME specific subject as one of the "
+            "existing blocks and should be merged into it. Provide that block's id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "block_id": {
+                    "type": "string",
+                    "description": "id of the existing block to merge the new information into.",
+                }
+            },
+            "required": ["block_id"],
+        },
+    },
+    {
+        "name": "insert_new",
+        "description": (
+            "The new information is a DISTINCT topic from every candidate block and "
+            "should be stored as a brand-new block."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+
+def make_augment_decision_fn(
+    client: anthropic.Anthropic,
+    model: str = "claude-haiku-4-5-20251001",
+) -> Callable[[str, list[tuple[str, str]]], str | None]:
+    """LLM judge for algorithmic-mode augmentation.
+
+    Given incoming content and a short list of (block_id, content) candidates (the
+    top semantically-similar in-context blocks), returns the block_id to augment into,
+    or None to insert a new block. Decides on *subject identity*, not raw cosine — so
+    a follow-up about the same entity merges, while different entities with similar
+    wording stay separate. Falls back to None (insert new) on any failure: never
+    silently merge distinct facts.
+    """
+    def decide(incoming: str, candidates: list[tuple[str, str]]) -> str | None:
+        if not candidates:
+            return None
+        valid_ids = {bid for bid, _ in candidates}
+        listing = "\n\n".join(f"[{bid}]\n{content}" for bid, content in candidates)
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=256,
+                tools=_AUGMENT_DECISION_TOOLS,
+                tool_choice={"type": "any"},
+                messages=[{"role": "user", "content": (
+                    "A new piece of information just arrived. Decide whether it should be "
+                    "MERGED into one of the existing memory blocks because it is about the "
+                    "same specific subject (e.g. a follow-up question or update about the "
+                    "same entity/topic), or stored as a NEW block because it is a distinct "
+                    "topic. Only merge when they are genuinely about the same subject — "
+                    "similar phrasing about different subjects must stay separate.\n\n"
+                    f"NEW INFORMATION:\n{incoming}\n\n"
+                    f"EXISTING BLOCKS:\n{listing}\n\n"
+                    "Call augment_into with the matching block_id, or insert_new."
+                )}],
+            )
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    if block.name == "augment_into":
+                        chosen = (block.input or {}).get("block_id", "")
+                        return chosen if chosen in valid_ids else None
+                    if block.name == "insert_new":
+                        return None
+            return None
+        except Exception:
+            return None
+
+    return decide
+
+
 def make_union_merge_fn(
     client: anthropic.Anthropic,
     model: str = "claude-haiku-4-5-20251001",
