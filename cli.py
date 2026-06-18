@@ -10,7 +10,15 @@ from agent import Agent, MemoryMode
 from ContextManager import ContextManager
 from controller import MemoryController
 from functions.llm_fns import make_compress_fn, make_merge_fn
-from llm_client import OPENROUTER_HAIKU, OPENROUTER_SONNET, has_llm_key, make_anthropic_client
+from llm_client import (
+    ANTHROPIC_HAIKU,
+    ANTHROPIC_SONNET,
+    OPENROUTER_HAIKU,
+    OPENROUTER_SONNET,
+    default_models,
+    has_llm_key,
+    make_anthropic_client,
+)
 from memory.longterm import LongTermStore
 from memory.novelty import NoveltyMode
 from memory.store import ContextStore
@@ -21,6 +29,9 @@ def print_memory(cm: ContextManager) -> None:
 
 
 def main() -> None:
+    # Defaults follow whichever client make_anthropic_client() will actually build:
+    # OpenRouter handles when an OpenRouter key is set, else native Anthropic ids.
+    default_model, default_util_model = default_models()
     parser = argparse.ArgumentParser(
         description="Interactive REPL for the LLM memory manager. Chat with the agent "
         "and watch the compression/eviction/promotion lifecycle run after each turn.",
@@ -49,8 +60,11 @@ interactive commands:
   /quit     exit
 
 env:
-  OPENROUTER_API_KEY or ANTHROPIC_API_KEY   one required (routes via OpenRouter
-                      when the OpenRouter key is set). Neither needed with --local.
+  OPENROUTER_API_KEY_MANAGER / OPENROUTER_API_KEY / ANTHROPIC_API_KEY
+                      one required. Routes via OpenRouter when an OpenRouter key
+                      is set (OPENROUTER_API_KEY_MANAGER takes precedence over
+                      OPENROUTER_API_KEY); otherwise uses the native Anthropic API.
+                      Neither needed with --local.
 
 examples:
   python cli.py                                  # algorithmic mode, tiny budget
@@ -82,15 +96,20 @@ examples:
     )
     parser.add_argument(
         "--model",
-        default=OPENROUTER_SONNET,
-        help=f"Model for the main conversation turns. Default: {OPENROUTER_SONNET} "
-        "(via OpenRouter when OPENROUTER_API_KEY is set).",
+        default=default_model,
+        help="Model for the main conversation turns. Default is resolved at runtime: "
+        f"the OpenRouter handle ({OPENROUTER_SONNET}) when an OpenRouter key is set, "
+        f"else the native Anthropic id ({ANTHROPIC_SONNET}). "
+        f"Currently: {default_model}.",
     )
     parser.add_argument(
         "--util-model",
-        default=OPENROUTER_HAIKU,
+        default=default_util_model,
         help="Cheaper model used for compression summaries, block merges, and "
-        f"(when --novelty is llm/hybrid) novelty scoring. Default: {OPENROUTER_HAIKU}.",
+        "(when --novelty is llm/hybrid) novelty scoring. Default is resolved at "
+        f"runtime: the OpenRouter handle ({OPENROUTER_HAIKU}) when an OpenRouter key "
+        f"is set, else the native Anthropic id ({ANTHROPIC_HAIKU}). "
+        f"Currently: {default_util_model}.",
     )
     parser.add_argument(
         "--db",

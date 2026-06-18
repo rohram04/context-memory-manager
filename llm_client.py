@@ -25,9 +25,26 @@ OPENROUTER_HAIKU = "anthropic/claude-haiku-4.5"
 # Letta uses provider-prefixed handles.
 LETTA_OPENROUTER_SONNET = "openrouter/anthropic/claude-sonnet-4.6"
 
+# Native Anthropic model ids (dashed, no provider prefix) for the ANTHROPIC_API_KEY
+# fallback path. The OpenRouter handles above are NOT valid native ids.
+ANTHROPIC_SONNET = "claude-sonnet-4-6"
+ANTHROPIC_HAIKU = "claude-haiku-4-5-20251001"
+
 
 def _openrouter_key() -> str | None:
     return os.environ.get("OPENROUTER_API_KEY_MANAGER") or os.environ.get("OPENROUTER_API_KEY")
+
+
+def default_models() -> tuple[str, str]:
+    """Return (main_model, util_model) ids matching the active routing.
+
+    When an OpenRouter key is set, make_anthropic_client() routes through
+    OpenRouter, so the OpenRouter handles are correct. Otherwise the client
+    talks to the native Anthropic API, which only accepts the dashed ids.
+    """
+    if _openrouter_key():
+        return OPENROUTER_SONNET, OPENROUTER_HAIKU
+    return ANTHROPIC_SONNET, ANTHROPIC_HAIKU
 
 
 def make_anthropic_client() -> anthropic.Anthropic:
