@@ -69,6 +69,10 @@ class ContextManager:
         return self._store.used_tokens
 
     @property
+    def max_tokens(self) -> int:
+        return self._store.max_tokens
+
+    @property
     def budget_pressure(self) -> str:
         return self._store.budget_pressure
 
@@ -150,6 +154,15 @@ class ContextManager:
     ) -> CacheBlock | None:
         """Return the most similar block above threshold, or None."""
         return self._store.find_similar(embedding, threshold)
+
+    def find_top_k(
+        self,
+        embedding: list[float],
+        k: int = 3,
+        min_sim: float = 0.0,
+    ) -> list[tuple[CacheBlock, float]]:
+        """Top-k similar in-context blocks (>= min_sim), highest first."""
+        return self._store.find_top_k(embedding, k, min_sim)
 
     # ------------------------------------------------------------------
     # Primitives — callable by the algorithmic layer or LLM tools
@@ -321,6 +334,7 @@ class ContextManager:
             tier = "stub" if block.pointer_to_lt_id else "full"
             lines.append(
                 f"{block.id} | tier: {tier} | novelty: {block.novelty_score:.2f}"
+                f" | fidelity: {block.fidelity:.2f} | tokens: {block.token_cost}"
                 f" | access: {block.access_count} | decay: {block.decay_score:.2f}"
             )
             lines.append(f'  "{block.content}"')

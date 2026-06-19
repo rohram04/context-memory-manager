@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Callable, Iterator
 
 import anthropic
+import tiktoken
 
 from controller import MemoryController
 from functions.memory_tools import MemoryTools
 from memory.novelty import NoveltyMode, build_novelty_fn
+
+# Same encoder CacheBlock.token_cost uses, so the room check in PREP matches the
+# token accounting the store reports.
+_ENC = tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    return len(_ENC.encode(text))
 
 
 class MemoryMode(str, Enum):
@@ -21,24 +31,47 @@ _ALGO_INSTRUCTIONS = (
     "state of your context. Focus on your task; memory management is handled for you."
 )
 
-_LLM_INSTRUCTIONS = """\
-You manage your own context window using structured function calls (tools). \
-The MEMORY STATUS block below shows all active blocks with their novelty, decay, and token costs.
+# The LLM turn runs in three phases. PHASE 1 (PREP): surface relevant memory AND free
+# budget — tool calls only, no reply — so there is room within budget before the reply
+# is generated. PHASE 2 (REPLY): plain text against the now-fitted context, no tools.
+# PHASE 3 (PERSIST): persist the exchange and re-score — tool calls only. Splitting this
+# way frees budget BEFORE the reply (avoiding context overflow), keeps the reply isolated
+# as phase-2's plain text (clean token streaming), and lets the model persist its OWN
+# reply (phase 3 sees it). PREP/PERSIST are tool-only with no user-facing text, so the
+# same blocking phase methods serve the blocking turn, the streaming turn, and the eval.
 
-Each turn, call tools as needed, then always end with a plain text reply to the user:
-- Before persisting new information, scan MEMORY BLOCKS for any block that overlaps in topic.
-  - If one exists, call augment(block_id, new_content) — write the FULL merged block as new_content. Combine the existing content and the new information into a single coherent block with no redundant or repeated facts. Drop anything the new content supersedes; keep what's still true.
-  - If no existing block covers it, call store() with the new content.
-- Call compress() or evict() to free token budget when pressure is medium or higher.
-- Call query_lt() or promote() to surface relevant long-term memories before responding.
-- Call update_novelty() when new information changes how significant an existing block is.
+_LLM_PREP_INSTRUCTIONS = """\
+You manage your own long-term memory. Before you reply to the user, prepare your context \
+window — using ONLY tool calls, write no prose. The MEMORY STATUS block below shows your \
+current memory blocks (novelty, fidelity, token cost, decay) and budget pressure.
 
-Rules:
-- Prefer augment over store whenever an existing block is topically related — duplicate blocks waste budget.
-- When augmenting, the merged block must not repeat facts that were already in the existing block; integrate, don't concatenate.
-- After all tool calls, always write a conversational text response to the user.
-- Use the structured tool call interface only — do not write tool calls as plain text or JSON.\
-"""
+1. SURFACE (only if the topic may have history): call query_lt(query) to search long-term
+   memory, and promote(lt_block_id) to bring any genuinely relevant blocks into context so
+   your answer can use them.
+2. FREE BUDGET: if budget pressure is medium or higher (or surfacing pushed you over),
+   compress(block_id, compressed_content) low-novelty/low-decay blocks, or evict(block_id)
+   blocks unlikely to be needed for this turn — make room before you reply.
+
+Do NOT reply to the user here and do NOT store/augment/re-score — that happens in later
+phases. When your context is surfaced and within budget, stop (end your turn)."""
+
+_LLM_PERSIST_INSTRUCTIONS = """\
+You just replied to the user. The conversation above shows the user's message and your \
+reply. Update your managed memory to reflect this exchange, using ONLY tool calls — write no prose.
+
+1. PERSIST: call store(content, novelty) for genuinely new information, or augment(block_id,
+   new_content) to merge into an existing block (write the FULL merged content; integrate,
+   don't concatenate; drop what's superseded). Persist what matters from BOTH the user's
+   message and your reply — you may keep them as separate blocks or combine them into one,
+   your choice. Prefer augment over store when a block already covers the topic.
+2. RE-SCORE: call update_novelty(block_id, novelty) where significance has changed.
+
+When memory reflects this exchange, stop (end your turn without writing text)."""
+
+# Minimal user-role nudge that opens phase 3. A trailing user turn is REQUIRED — the
+# messages array cannot end on the assistant reply (400 on Sonnet 4.6 / the 4.6+ family).
+# This must NOT restate _LLM_PERSIST_INSTRUCTIONS; the detailed how-to lives there.
+_PERSIST_NUDGE = "Now persist this exchange and re-score. Use tool calls only, then stop."
 
 
 def _extract_text(content: list) -> str:
@@ -60,8 +93,11 @@ class Agent:
         novelty_model: str = "claude-haiku-4-5-20251001",
         system_prompt: str = "",
         max_tool_iterations: int = 10,
+        max_prep_refires: int = 3,
+        on_receive: Callable[[str, str], None] | None = None,
     ) -> None:
         self._controller = controller
+        self._on_receive = on_receive
         self._client = client
         self._model = model
         self._mode = mode
@@ -71,6 +107,7 @@ class Agent:
         self._tools = MemoryTools(controller._cm)
         self._system_prompt = system_prompt
         self._max_tool_iterations = max_tool_iterations
+        self._max_prep_refires = max_prep_refires
         self._messages: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -81,7 +118,7 @@ class Agent:
         """Process one user turn and return the assistant's response."""
         self._messages.append({"role": "user", "content": user_message})
         if self._mode == MemoryMode.LLM:
-            response_text = self._llm_turn()
+            response_text = self._llm_turn(user_message)
         else:
             response_text = self._algorithmic_turn(user_message)
         self._messages.append({"role": "assistant", "content": response_text})
@@ -100,6 +137,90 @@ class Agent:
         )
 
     # ------------------------------------------------------------------
+    # Streaming API (demo-facing; mirrors chat() turn logic, token-by-token)
+    # ------------------------------------------------------------------
+
+    def _stream_model_call(self, messages, system, tools=None):
+        """Stream one model call. Yields ("token", delta) per text delta, then
+        ("final", final_message) with the completed message (stop_reason +
+        content blocks)."""
+        kwargs = dict(
+            model=self._model, max_tokens=4096, system=system, messages=messages
+        )
+        if tools is not None:
+            kwargs["tools"] = tools
+        with self._client.messages.stream(**kwargs) as stream:
+            for delta in stream.text_stream:
+                yield ("token", delta)
+            final = stream.get_final_message()
+        yield ("final", final)
+
+    def stream_chat(self, user_message: str) -> Iterator[dict]:
+        """Streamed analogue of chat(): yields demo-agnostic events
+        ({"type":"user"}, {"type":"token","delta":..}, {"type":"assistant","text":..}).
+        Both memory modes stream token-by-token via the shared _stream_model_call."""
+        self._messages.append({"role": "user", "content": user_message})
+        if self._mode == MemoryMode.LLM:
+            yield from self._stream_llm_turn(user_message)
+        else:
+            yield from self._stream_algorithmic_turn(user_message)
+
+    def _stream_algorithmic_turn(self, user_message: str) -> Iterator[dict]:
+        user_embedding = self._controller.embed(user_message)
+        self._controller.receive(
+            user_message, user_embedding, self._novelty_fn(user_message, user_embedding)
+        )
+        if self._on_receive:
+            self._on_receive("user", user_message)
+        yield {"type": "user"}
+
+        text = ""
+        # Context = memory blocks (system) + only the current turn; prior turns live in
+        # the blocks, so the prompt stays bounded by the memory budget.
+        for ev, val in self._stream_model_call(
+            [{"role": "user", "content": user_message}], self._build_system_prompt()
+        ):
+            if ev == "token":
+                text += val
+                yield {"type": "token", "delta": val}
+
+        text_embedding = self._controller.embed(text)
+        self._controller.receive(
+            text, text_embedding, self._novelty_fn(text, text_embedding)
+        )
+        if self._on_receive:
+            self._on_receive("assistant", text)
+        self._messages.append({"role": "assistant", "content": text})
+        yield {"type": "assistant", "text": text}
+
+    def _stream_llm_turn(self, user_message: str) -> Iterator[dict]:
+        if self._on_receive:
+            self._on_receive("user", user_message)
+        yield {"type": "user"}
+
+        # Phase 1 — PREP: surface relevant memory + free budget (tool-only, no streaming).
+        # Shares the blocking phase method with _llm_turn and the eval path.
+        self._llm_prep_phase(user_message)
+
+        # Phase 2 — REPLY: stream plain text against the now-fitted context (no tools).
+        # The reply is the only prose, so accumulated tokens == the reply (no pollution).
+        reply = ""
+        for ev, val in self._stream_model_call(
+            [{"role": "user", "content": user_message}], self._build_system_prompt("")
+        ):
+            if ev == "token":
+                reply += val
+                yield {"type": "token", "delta": val}
+
+        # Phase 3 — PERSIST: persist the exchange (incl. the reply) + re-score (tool-only).
+        self._llm_persist_phase(user_message, reply)
+
+        self._messages.append({"role": "assistant", "content": reply})
+        if self._on_receive:
+            self._on_receive("assistant", reply)  # snapshot reflects the persisted reply
+        yield {"type": "assistant", "text": reply}
+
+    # ------------------------------------------------------------------
     # Turn handlers
     # ------------------------------------------------------------------
 
@@ -108,36 +229,39 @@ class Agent:
         self._controller.receive(
             user_message, user_embedding, self._novelty_fn(user_message, user_embedding)
         )
+        if self._on_receive:
+            self._on_receive("user", user_message)
+        # Context = memory blocks (system) + only the current turn (see note above).
         response = self._client.messages.create(
             model=self._model,
             max_tokens=4096,
             system=self._build_system_prompt(),
-            messages=self._messages,
+            messages=[{"role": "user", "content": user_message}],
         )
         text = _extract_text(response.content)
         text_embedding = self._controller.embed(text)
         self._controller.receive(
             text, text_embedding, self._novelty_fn(text, text_embedding)
         )
+        if self._on_receive:
+            self._on_receive("assistant", text)
         return text
 
-    def _llm_turn(self) -> str:
-        # Work on a local copy so intermediate tool-use turns never enter self._messages
-        messages = list(self._messages)
-        system = self._build_system_prompt()
-
+    def _blocking_tool_loop(self, messages, instructions, tools) -> str:
+        """Blocking tool loop until end_turn. Returns accumulated assistant text and
+        mutates `messages`. System prompt rebuilt each iteration to reflect memory state."""
+        text = ""
         for _ in range(self._max_tool_iterations):
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=4096,
-                system=system,
+                system=self._build_system_prompt(instructions),
                 messages=messages,
-                tools=MemoryTools.SCHEMAS,
+                tools=tools,
             )
-
+            text += _extract_text(response.content)
             if response.stop_reason == "end_turn":
-                return _extract_text(response.content)
-
+                return text
             if response.stop_reason == "tool_use":
                 tool_results = []
                 for block in response.content:
@@ -150,25 +274,83 @@ class Agent:
                         })
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": tool_results})
-                system = self._build_system_prompt()
                 continue
-
             break
+        return text
 
-        raise RuntimeError(
-            f"Tool-use loop exceeded {self._max_tool_iterations} iterations"
+    def _llm_prep_phase(self, user_message: str) -> None:
+        """Phase 1 — SURFACE + FREE BUDGET. Loop the LLM (query_lt/promote/compress/evict)
+        until there's room within budget for the incoming message, then a hard algorithmic
+        backstop. Tool-only (no user-facing text), so it is shared by the blocking turn,
+        the streaming turn, and the eval path."""
+        for _ in range(self._max_prep_refires):
+            self._blocking_tool_loop(
+                [{"role": "user", "content": user_message}],
+                _LLM_PREP_INSTRUCTIONS, MemoryTools.PREP_TOOLS,
+            )
+            if self._has_room_for(user_message):
+                return
+        # Backstop: the model didn't free enough room in max_prep_refires passes.
+        # Algorithmic fit_budget guarantees termination and that the reply is generated
+        # within budget (no context overflow). Just-promoted blocks are freshly accessed
+        # (high recency → low compression priority), so stale blocks are dropped first.
+        self._controller.fit_budget()
+
+    def _llm_persist_phase(self, user_message: str, reply: str) -> None:
+        """Phase 3 — PERSIST + RESCORE. The exchange is a natural user/assistant pair plus
+        a required trailing user nudge: the messages array cannot end on the assistant
+        reply (400 on Sonnet 4.6 / the 4.6+ family). Detailed how-to lives only in the
+        system prompt; the nudge is a one-liner."""
+        self._blocking_tool_loop(
+            [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": reply},
+                {"role": "user", "content": _PERSIST_NUDGE},
+            ],
+            _LLM_PERSIST_INSTRUCTIONS, MemoryTools.PERSIST_TOOLS,
         )
+
+    def _has_room_for(self, text: str) -> bool:
+        """True when the current context plus the incoming message fits the token budget."""
+        cm = self._controller._cm
+        return cm.used_tokens + _count_tokens(text) <= cm.max_tokens
+
+    def _llm_turn(self, user_message: str) -> str:
+        # Three-phase (parity with the streaming path): PREP surfaces relevant memory and
+        # frees budget so the reply is generated within budget; REPLY is the sole plain
+        # text; PERSIST stores the exchange and re-scores. on_receive("user") captures
+        # pre-turn state; on_receive("assistant") fires after PERSIST so the snapshot
+        # reflects the persisted reply.
+        if self._on_receive:
+            self._on_receive("user", user_message)
+
+        self._llm_prep_phase(user_message)
+
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=4096,
+            system=self._build_system_prompt(""),  # base + memory prompt, no phase instructions
+            messages=[{"role": "user", "content": user_message}],
+        )
+        reply = _extract_text(response.content)
+
+        self._llm_persist_phase(user_message, reply)
+
+        if self._on_receive:
+            self._on_receive("assistant", reply)
+        return reply
 
     # ------------------------------------------------------------------
     # System prompt
     # ------------------------------------------------------------------
 
-    def _build_system_prompt(self) -> str:
-        instructions = (
-            _ALGO_INSTRUCTIONS
-            if self._mode == MemoryMode.ALGORITHMIC
-            else _LLM_INSTRUCTIONS
-        )
+    def _build_system_prompt(self, instructions: str | None = None) -> str:
+        # LLM-mode phases always pass explicit instructions (PREP/PERSIST) or "" (REPLY),
+        # so the default branch only supplies the algorithmic mode's standing instructions.
+        if instructions is None:
+            instructions = (
+                _ALGO_INSTRUCTIONS if self._mode == MemoryMode.ALGORITHMIC else ""
+            )
         parts = [p for p in [self._system_prompt, instructions] if p]
         parts.append(self._controller.build_memory_prompt())
         return "\n\n".join(parts)
