@@ -201,7 +201,21 @@ class MemoryTools:
         s for s in SCHEMAS if s["name"] in {"query_lt", "promote", "compress", "evict"}
     ]
     PERSIST_TOOLS: ClassVar[list[dict]] = [
-        s for s in SCHEMAS if s["name"] in {"store", "augment", "update_novelty"}
+        {
+            **s,
+            "description": (
+                "Create a new memory block. Default: synthesize the full exchange above "
+                "(user message + your reply in one coherent block). Split into multiple "
+                "blocks only when the exchange has clearly separate topics or only one "
+                "side is worth remembering. Prefer augment() when a related block exists. "
+                "Set novelty high (close to 1.0) for unique, surprising, or critical "
+                "information; low (close to 0.0) for routine or redundant information."
+            ),
+        }
+        if s["name"] == "store"
+        else s
+        for s in SCHEMAS
+        if s["name"] in {"store", "augment", "update_novelty"}
     ]
 
     def __init__(self, context_manager: ContextManager) -> None:

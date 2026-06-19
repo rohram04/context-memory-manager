@@ -56,14 +56,25 @@ Do NOT reply to the user here and do NOT store/augment/re-score — that happens
 phases. When your context is surfaced and within budget, stop (end your turn)."""
 
 _LLM_PERSIST_INSTRUCTIONS = """\
-You just replied to the user. The conversation above shows the user's message and your \
-reply. Update your managed memory to reflect this exchange, using ONLY tool calls — write no prose.
+You just replied to the user. The exchange above combines the user's message and your \
+reply in one turn. Update your managed memory to reflect this exchange, using ONLY tool \
+calls — write no prose.
 
-1. PERSIST: call store(content, novelty) for genuinely new information, or augment(block_id,
-   new_content) to merge into an existing block (write the FULL merged content; integrate,
-   don't concatenate; drop what's superseded). Persist what matters from BOTH the user's
-   message and your reply — you may keep them as separate blocks or combine them into one,
-   your choice. Prefer augment over store when a block already covers the topic.
+1. PERSIST — default: ONE combined block. Call store(content, novelty) or augment(\
+block_id, new_content) with content that synthesizes the full exchange (integrate what \
+the user said and what you replied; drop superseded details). Prefer augment over store \
+when a block already covers the topic. Write the FULL merged content — integrate, don't \
+concatenate.
+
+   Split into separate blocks ONLY when clearly justified:
+   - The exchange contains multiple unrelated facts (one store/augment per distinct topic).
+   - Only the user's side is worth remembering and your reply is generic boilerplate \
+(store the durable user fact alone; skip the fluff).
+   - User and assistant content need different novelty scores or lifecycles.
+
+   Do NOT split by default — mirroring the raw user message and your reply as two blocks \
+for the same topic is wrong.
+
 2. RE-SCORE: call update_novelty(block_id, novelty) where significance has changed.
 
 When memory reflects this exchange, stop (end your turn without writing text)."""
@@ -72,6 +83,11 @@ When memory reflects this exchange, stop (end your turn without writing text).""
 # messages array cannot end on the assistant reply (400 on Sonnet 4.6 / the 4.6+ family).
 # This must NOT restate _LLM_PERSIST_INSTRUCTIONS; the detailed how-to lives there.
 _PERSIST_NUDGE = "Now persist this exchange and re-score. Use tool calls only, then stop."
+
+
+def _format_exchange(user_message: str, reply: str) -> str:
+    """Single user-role payload for persist phase (user + assistant in one block)."""
+    return f"User: {user_message}\n\nAssistant: {reply}"
 
 
 def _extract_text(content: list) -> str:
@@ -297,17 +313,14 @@ class Agent:
         self._controller.fit_budget()
 
     def _llm_persist_phase(self, user_message: str, reply: str) -> None:
-        """Phase 3 — PERSIST + RESCORE. The exchange is a natural user/assistant pair plus
-        a required trailing user nudge: the messages array cannot end on the assistant
-        reply (400 on Sonnet 4.6 / the 4.6+ family). Detailed how-to lives only in the
-        system prompt; the nudge is a one-liner."""
+        """Phase 3 — PERSIST + RESCORE."""
         self._blocking_tool_loop(
             [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": reply},
+                {"role": "user", "content": _format_exchange(user_message, reply)},
                 {"role": "user", "content": _PERSIST_NUDGE},
             ],
-            _LLM_PERSIST_INSTRUCTIONS, MemoryTools.PERSIST_TOOLS,
+            _LLM_PERSIST_INSTRUCTIONS,
+            MemoryTools.PERSIST_TOOLS,
         )
 
     def _has_room_for(self, text: str) -> bool:
