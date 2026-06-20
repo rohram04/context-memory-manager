@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-
-import anthropic
 
 from agent import Agent, MemoryMode
 from ContextManager import ContextManager
 from controller import MemoryController
 from functions.llm_fns import make_compress_fn, make_merge_fn
-from llm_client import (
-    ANTHROPIC_HAIKU,
-    ANTHROPIC_SONNET,
-    OPENROUTER_HAIKU,
-    OPENROUTER_SONNET,
-    default_models,
-    has_llm_key,
-    make_anthropic_client,
-)
+from llm_client import default_models, has_llm_key, make_llm_backend
 from memory.longterm import LongTermStore
 from memory.novelty import NoveltyMode
 from memory.store import ContextStore
@@ -29,9 +18,6 @@ def print_memory(cm: ContextManager) -> None:
 
 
 def main() -> None:
-    # Defaults follow whichever client make_anthropic_client() will actually build:
-    # OpenRouter handles when an OpenRouter key is set, else native Anthropic ids.
-    default_model, default_util_model = default_models()
     parser = argparse.ArgumentParser(
         description="Interactive REPL for the LLM memory manager. Chat with the agent "
         "and watch the compression/eviction/promotion lifecycle run after each turn.",
@@ -60,11 +46,8 @@ interactive commands:
   /quit     exit
 
 env:
-  OPENROUTER_API_KEY_MANAGER / OPENROUTER_API_KEY / ANTHROPIC_API_KEY
-                      one required. Routes via OpenRouter when an OpenRouter key
-                      is set (OPENROUTER_API_KEY_MANAGER takes precedence over
-                      OPENROUTER_API_KEY); otherwise uses the native Anthropic API.
-                      Neither needed with --local.
+  OPENROUTER_API_KEY or ANTHROPIC_API_KEY   one required (routes via OpenRouter
+                      when the OpenRouter key is set). Neither needed with --local.
 
 examples:
   python cli.py                                  # algorithmic mode, tiny budget
@@ -96,20 +79,14 @@ examples:
     )
     parser.add_argument(
         "--model",
-        default=default_model,
-        help="Model for the main conversation turns. Default is resolved at runtime: "
-        f"the OpenRouter handle ({OPENROUTER_SONNET}) when an OpenRouter key is set, "
-        f"else the native Anthropic id ({ANTHROPIC_SONNET}). "
-        f"Currently: {default_model}.",
+        default=None,
+        help="Model for the main conversation turns. Default: from default_models().",
     )
     parser.add_argument(
         "--util-model",
-        default=default_util_model,
+        default=None,
         help="Cheaper model used for compression summaries, block merges, and "
-        "(when --novelty is llm/hybrid) novelty scoring. Default is resolved at "
-        f"runtime: the OpenRouter handle ({OPENROUTER_HAIKU}) when an OpenRouter key "
-        f"is set, else the native Anthropic id ({ANTHROPIC_HAIKU}). "
-        f"Currently: {default_util_model}.",
+        "(when --novelty is llm/hybrid) novelty scoring. Default: from default_models().",
     )
     parser.add_argument(
         "--db",
@@ -123,6 +100,14 @@ examples:
         default="all-MiniLM-L6-v2",
         help="sentence-transformers model for embeddings (novelty, similarity, "
         "promotion). Default: all-MiniLM-L6-v2 (384-dim, local).",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("anthropic", "openrouter"),
+        default=None,
+        help="LLM API backend: 'openrouter' (OpenAI chat completions, default when "
+        "OPENROUTER_API_KEY is set) or 'anthropic' (Anthropic Messages API). "
+        "Can also set LLM_BACKEND env var.",
     )
     parser.add_argument(
         "--local",
@@ -144,40 +129,47 @@ examples:
     )
     args = parser.parse_args()
 
+    default_main, default_util = default_models()
+    if args.model is None:
+        args.model = default_main
+    if args.util_model is None:
+        args.util_model = default_util
+
     if args.local:
-        client = anthropic.Anthropic(
-            api_key="local",
-            base_url=args.local_base_url,
+        backend = make_llm_backend(
+            local=True,
+            local_base_url=args.local_base_url,
         )
-        # Override both the main model and util model with the local model so
-        # compress/merge/novelty calls all hit the same local endpoint.
         args.model = args.local_model
         args.util_model = args.local_model
     else:
         if not has_llm_key():
             print("Error: no LLM key set (OPENROUTER_API_KEY or ANTHROPIC_API_KEY).", file=sys.stderr)
             sys.exit(1)
-        client = make_anthropic_client()
+        backend = make_llm_backend(backend=args.backend)
 
     store = ContextStore(max_tokens=args.max_tokens)
     lt_store = LongTermStore(args.db)
     cm = ContextManager(store, lt_store, embedding_model=args.embedding_model)
     controller = MemoryController(
         cm,
-        compress_fn=make_compress_fn(client, args.util_model),
-        merge_fn=make_merge_fn(client, cm, args.util_model),
+        compress_fn=make_compress_fn(backend, args.util_model),
+        merge_fn=make_merge_fn(backend, cm, args.util_model),
     )
     agent = Agent(
         controller,
-        client,
+        backend,
         model=args.model,
         mode=MemoryMode(args.mode),
         novelty_mode=NoveltyMode(args.novelty),
         novelty_model=args.util_model,
     )
 
-    backend = f"local ({args.local_base_url})" if args.local else "anthropic"
-    print(f"Memory manager REPL — mode={args.mode}, novelty={args.novelty}, budget={args.max_tokens} tokens, backend={backend}")
+    backend_label = f"local ({args.local_base_url})" if args.local else (args.backend or "auto")
+    print(
+        f"Memory manager REPL — mode={args.mode}, novelty={args.novelty}, "
+        f"budget={args.max_tokens} tokens, backend={backend_label}"
+    )
     print("Commands: /status (show memory), /reset (clear chat history), /quit\n")
 
     while True:

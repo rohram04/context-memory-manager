@@ -1,60 +1,25 @@
-"""Anthropic-SDK client factory — routes through OpenRouter when configured.
+"""LLM client factory — re-exports from llm.factory for backward compatibility."""
 
-The codebase calls Claude via the Anthropic SDK (`client.messages.create`).
-OpenRouter exposes an Anthropic-compatible endpoint at https://openrouter.ai/api
-(the SDK appends /v1/messages), so we can keep all existing call sites and just
-point the client at OpenRouter when an OpenRouter key is present.
+from llm.factory import (
+    ANTHROPIC_HAIKU,
+    ANTHROPIC_SONNET,
+    LETTA_OPENROUTER_SONNET,
+    OPENROUTER_HAIKU,
+    OPENROUTER_SONNET,
+    default_models,
+    has_llm_key,
+    make_llm_backend,
+)
+from llm.openrouter_tools import OPENROUTER_BASE_URL
 
-Env vars (checked in order for the manager's key):
-  OPENROUTER_API_KEY_MANAGER  — key for our memory manager's calls
-  OPENROUTER_API_KEY          — shared OpenRouter key (also used by the Letta server)
-  ANTHROPIC_API_KEY           — native Anthropic fallback (no OpenRouter routing)
-"""
-
-from __future__ import annotations
-
-import os
-
-import anthropic
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api"
-
-# OpenRouter model ids (Anthropic-compatible skin). Verified available 2026-06.
-OPENROUTER_SONNET = "anthropic/claude-sonnet-4.6"
-OPENROUTER_HAIKU = "anthropic/claude-haiku-4.5"
-# Letta uses provider-prefixed handles.
-LETTA_OPENROUTER_SONNET = "openrouter/anthropic/claude-sonnet-4.6"
-
-# Native Anthropic model ids (dashed, no provider prefix) for the ANTHROPIC_API_KEY
-# fallback path. The OpenRouter handles above are NOT valid native ids.
-ANTHROPIC_SONNET = "claude-sonnet-4-6"
-ANTHROPIC_HAIKU = "claude-haiku-4-5-20251001"
-
-
-def _openrouter_key() -> str | None:
-    return os.environ.get("OPENROUTER_API_KEY_MANAGER") or os.environ.get("OPENROUTER_API_KEY")
-
-
-def default_models() -> tuple[str, str]:
-    """Return (main_model, util_model) ids matching the active routing.
-
-    When an OpenRouter key is set, make_anthropic_client() routes through
-    OpenRouter, so the OpenRouter handles are correct. Otherwise the client
-    talks to the native Anthropic API, which only accepts the dashed ids.
-    """
-    if _openrouter_key():
-        return OPENROUTER_SONNET, OPENROUTER_HAIKU
-    return ANTHROPIC_SONNET, ANTHROPIC_HAIKU
-
-
-def make_anthropic_client() -> anthropic.Anthropic:
-    """Anthropic client routed through OpenRouter if a key is set, else native."""
-    or_key = _openrouter_key()
-    if or_key:
-        return anthropic.Anthropic(api_key=or_key, base_url=OPENROUTER_BASE_URL)
-    return anthropic.Anthropic()  # native Anthropic via ANTHROPIC_API_KEY
-
-
-def has_llm_key() -> bool:
-    """True if any usable key is configured (OpenRouter or native Anthropic)."""
-    return bool(_openrouter_key() or os.environ.get("ANTHROPIC_API_KEY"))
+__all__ = [
+    "ANTHROPIC_HAIKU",
+    "ANTHROPIC_SONNET",
+    "LETTA_OPENROUTER_SONNET",
+    "OPENROUTER_BASE_URL",
+    "OPENROUTER_HAIKU",
+    "OPENROUTER_SONNET",
+    "default_models",
+    "has_llm_key",
+    "make_llm_backend",
+]

@@ -24,7 +24,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import anthropic
 from sentence_transformers import SentenceTransformer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,7 +38,9 @@ from eval.stress_test import (  # noqa: E402
     interleave,
     retrieve_top1,
 )
-from functions.llm_fns import _extract_text, make_compress_fn, make_merge_fn  # noqa: E402
+from functions.llm_fns import make_compress_fn, make_merge_fn  # noqa: E402
+from llm.interface import LLMBackend  # noqa: E402
+from llm_client import has_llm_key, make_llm_backend  # noqa: E402
 from memory.longterm import LongTermStore  # noqa: E402
 from memory.novelty import score_novelty_embedding  # noqa: E402
 from memory.store import ContextStore  # noqa: E402
@@ -59,7 +60,7 @@ def run_ours_live(
     needles: list[dict],
     max_tokens: int,
     embedder: SentenceTransformer,
-    client: anthropic.Anthropic,
+    backend: LLMBackend,
     util_model: str,
     query_model: str,
 ) -> list[dict]:
@@ -69,8 +70,8 @@ def run_ours_live(
     cm = ContextManager(store, lt_store, embedding_model=embedder)
     controller = MemoryController(
         cm,
-        compress_fn=make_compress_fn(client, util_model),
-        merge_fn=make_merge_fn(client, cm, util_model),
+        compress_fn=make_compress_fn(backend, util_model),
+        merge_fn=make_merge_fn(backend, cm, util_model),
     )
 
     print(f"  [ours] ingesting {len(items)} items...", flush=True)
@@ -87,13 +88,13 @@ def run_ours_live(
         q_emb = cm.embed(needle["query"])
         controller.pre_prompt_promote(q_emb)
         memory_prompt = controller.build_memory_prompt()
-        response = client.messages.create(
+        response = backend.complete(
             model=query_model,
             max_tokens=256,
             system=memory_prompt + _QUERY_SYSTEM_SUFFIX,
             messages=[{"role": "user", "content": needle["query"]}],
         )
-        answer = _extract_text(response.content)
+        answer = response.text
         retrieved = retrieve_top1(cm, lt_store, q_emb)
         token = needle["unique_token"]
         results.append({
@@ -177,8 +178,8 @@ def main() -> None:
     if "letta" in systems and not args.letta_base_url and not os.environ.get("LETTA_API_KEY"):
         print("Error: Letta requires --letta-base-url or LETTA_API_KEY.", file=sys.stderr)
         sys.exit(1)
-    if not os.environ.get("ANTHROPIC_API_KEY") and "ours" in systems:
-        print("Error: ANTHROPIC_API_KEY required for our system.", file=sys.stderr)
+    if not has_llm_key() and "ours" in systems:
+        print("Error: OPENROUTER_API_KEY or ANTHROPIC_API_KEY required for our system.", file=sys.stderr)
         sys.exit(1)
 
     out_path = (
@@ -190,7 +191,7 @@ def main() -> None:
 
     print(f"[niah_live] loading embedder: {args.embedding_model}", flush=True)
     embedder = SentenceTransformer(args.embedding_model)
-    client = anthropic.Anthropic() if "ours" in systems else None
+    backend = make_llm_backend() if "ours" in systems else None
 
     runs: list[dict[str, Any]] = []
     for n_distractors in args.distractors:
@@ -212,7 +213,7 @@ def main() -> None:
                 trial_rows.extend(
                     run_ours_live(
                         items, needles, args.max_tokens, embedder,
-                        client, args.util_model, args.query_model,
+                        backend, args.util_model, args.query_model,
                     )
                 )
                 print(f"  ours done in {time.perf_counter() - t0:.1f}s", flush=True)
