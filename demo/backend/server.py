@@ -33,7 +33,6 @@ from typing import Optional
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-import anthropic  # noqa: E402
 from fastapi import Depends, FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
@@ -41,7 +40,8 @@ from pydantic import BaseModel  # noqa: E402
 from sentence_transformers import SentenceTransformer  # noqa: E402
 from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
 
-from llm_client import default_models, make_anthropic_client  # noqa: E402
+from llm.interface import LLMBackend  # noqa: E402
+from llm_client import default_models, make_llm_backend  # noqa: E402
 
 from demo.backend.scripts import list_scripts, script_messages  # noqa: E402
 from demo.backend.sessions import (  # noqa: E402
@@ -71,21 +71,21 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _build_client() -> tuple[anthropic.Anthropic, str, str]:
-    """Return (client, model, util_model).
+def _build_backend() -> tuple[LLMBackend, str, str]:
+    """Return (backend, model, util_model).
 
     DEMO_LOCAL=1 routes LLM calls through a local LiteLLM proxy (no cost), exactly
-    like agent_server's --local path. Otherwise use the normal Anthropic/OpenRouter
-    client from llm_client.
+    like agent_server's --local path. Otherwise use the normal OpenRouter/Anthropic
+    backend from llm_client.
     """
     if os.environ.get("DEMO_LOCAL") == "1":
         base_url = os.environ.get("DEMO_LOCAL_BASE_URL", "http://localhost:4000")
         model = os.environ.get("DEMO_LOCAL_MODEL", "ollama/llama3.1:8b")
-        client = anthropic.Anthropic(api_key="local", base_url=base_url)
-        return client, model, model
-    client = make_anthropic_client()
+        backend = make_llm_backend(local=True, local_base_url=base_url)
+        return backend, model, model
+    backend = make_llm_backend()
     model, util_model = default_models()
-    return client, model, util_model
+    return backend, model, util_model
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +112,8 @@ app.add_middleware(
 
 print("[demo] loading embedding model: all-MiniLM-L6-v2", flush=True)
 _EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2")
-_CLIENT, _MODEL, _UTIL_MODEL = _build_client()
-registry = SessionRegistry(_CLIENT, _EMBEDDER, _MODEL, _UTIL_MODEL)
+_BACKEND, _MODEL, _UTIL_MODEL = _build_backend()
+registry = SessionRegistry(_BACKEND, _EMBEDDER, _MODEL, _UTIL_MODEL)
 
 
 # ---------------------------------------------------------------------------

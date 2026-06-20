@@ -18,48 +18,51 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from sentence_transformers import SentenceTransformer  # noqa: E402
 
+from llm.types import LLMResponse, ToolCall  # noqa: E402
+
 from demo.backend.sessions import SessionRegistry  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Stub Anthropic client (duck-typed: only needs .messages.create)
+# Stub LLM backend (duck-typed: complete + stream_complete)
 # ---------------------------------------------------------------------------
 
 
-class _TextBlock:
-    def __init__(self, text: str) -> None:
-        self.type = "text"
-        self.text = text
-
-
-class _ToolUseBlock:
-    def __init__(self, name: str, inp: dict) -> None:
-        self.type = "tool_use"
-        self.id = "tool_stub"
-        self.name = name
-        self.input = inp
-
-
-class _Response:
-    def __init__(self, content: list) -> None:
-        self.content = content
-        self.stop_reason = "end_turn"
-
-
-class _Messages:
-    def create(self, **kwargs):
-        # Compression path: tools present -> return a canned shorter summary.
+class StubBackend:
+    def complete(self, **kwargs) -> LLMResponse:
         if kwargs.get("tools"):
-            return _Response([
-                _ToolUseBlock("provide_summary", {"summary": "canned summary."})
-            ])
-        # Otherwise a plain conversational/merge reply.
-        return _Response([_TextBlock("Acknowledged. (stub reply)")])
+            tool_name = kwargs["tools"][0]["name"]
+            if tool_name == "provide_summary":
+                return LLMResponse(
+                    text="",
+                    tool_calls=[ToolCall(
+                        id="tool_stub",
+                        name="provide_summary",
+                        arguments={"summary": "canned summary."},
+                    )],
+                )
+            if tool_name == "augment_into":
+                return LLMResponse(
+                    text="",
+                    tool_calls=[ToolCall(
+                        id="tool_stub",
+                        name="insert_new",
+                        arguments={},
+                    )],
+                )
+            return LLMResponse(
+                text="",
+                tool_calls=[ToolCall(
+                    id="tool_stub",
+                    name=tool_name,
+                    arguments={},
+                )],
+            )
+        return LLMResponse(text="Acknowledged. (stub reply)")
 
-
-class StubClient:
-    def __init__(self) -> None:
-        self.messages = _Messages()
+    def stream_complete(self, **kwargs):
+        yield ("token", "Acknowledged. (stub reply)")
+        yield ("final", LLMResponse(text="Acknowledged. (stub reply)"))
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +82,7 @@ REQUIRED_SNAPSHOT_FIELDS = {
 
 
 def _registry() -> SessionRegistry:
-    return SessionRegistry(StubClient(), _EMBEDDER, "stub-model", "stub-util")
+    return SessionRegistry(StubBackend(), _EMBEDDER, "stub-model", "stub-util")
 
 
 def test_chat_produces_two_snapshots_with_blocks():

@@ -139,11 +139,7 @@ class ContextStore:
     def find_top_k(
         self, query_embedding: list[float], k: int = 3, min_sim: float = 0.0
     ) -> list[tuple[CacheBlock, float]]:
-        """Top-k context blocks by cosine vs query, each >= min_sim, highest first.
-
-        Used to build the candidate set for LLM-judged augmentation. Simple O(n)
-        scan + sort over original_embedding (the same field find_similar compares).
-        """
+        """Top-k context blocks by cosine vs query, each >= min_sim, highest first."""
         if not query_embedding:
             return []
         q = np.array(query_embedding, dtype=np.float32)

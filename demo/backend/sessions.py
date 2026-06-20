@@ -15,7 +15,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import anthropic
 from sentence_transformers import SentenceTransformer
 
 from agent import Agent, MemoryMode
@@ -26,8 +25,9 @@ from functions.llm_fns import (
     make_compress_fn,
     make_merge_fn,
 )
+from llm.interface import LLMBackend
 from memory.longterm import LongTermStore
-from memory.novelty import NoveltyMode, build_novelty_fn
+from memory.novelty import NoveltyMode
 from memory.store import ContextStore
 
 from demo.backend.snapshots import (
@@ -93,12 +93,12 @@ class SessionRegistry:
 
     def __init__(
         self,
-        client: anthropic.Anthropic,
+        backend: LLMBackend,
         embedder: SentenceTransformer,
         model: str,
         util_model: str,
     ) -> None:
-        self._client = client
+        self._backend = backend
         self._embedder = embedder
         self._model = model
         self._util_model = util_model
@@ -121,12 +121,9 @@ class SessionRegistry:
         cm = ContextManager(store, lt_store, embedding_model=self._embedder)
         controller = MemoryController(
             cm,
-            compress_fn=make_compress_fn(self._client, self._util_model),
-            merge_fn=make_merge_fn(self._client, cm, self._util_model),
-            # LLM-judged augmentation (config default ON): an extra cheap util-model
-            # call decides augment-vs-insert over the top similar candidates.
-            # Used by algorithmic mode; in LLM mode the model self-manages augmentation.
-            augment_decision_fn=make_augment_decision_fn(self._client, self._util_model),
+            compress_fn=make_compress_fn(self._backend, self._util_model),
+            merge_fn=make_merge_fn(self._backend, cm, self._util_model),
+            augment_decision_fn=make_augment_decision_fn(self._backend, self._util_model),
         )
         session = Session(
             sid=sid,
@@ -139,7 +136,7 @@ class SessionRegistry:
         )
         agent = Agent(
             controller,
-            self._client,
+            self._backend,
             model=self._model,
             mode=agent_mode,
             novelty_mode=NOVELTY_MODE,

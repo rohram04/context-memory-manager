@@ -191,6 +191,33 @@ class MemoryTools:
         },
     ]
 
+    # Per-phase subsets for the three-phase LLM turn. PREP (phase 1) surfaces relevant
+    # memory AND frees budget so there is room before the reply is generated; PERSIST
+    # (phase 3) persists the exchange and re-scores. Phase 2 (REPLY) offers no tools.
+    # Offering only a phase's tools structurally prevents the model from acting out of
+    # phase. compress/evict live in PREP (free budget before the reply), not PERSIST —
+    # any growth from PERSIST is fit by the next turn's PREP.
+    PREP_TOOLS: ClassVar[list[dict]] = [
+        s for s in SCHEMAS if s["name"] in {"query_lt", "promote", "compress", "evict"}
+    ]
+    PERSIST_TOOLS: ClassVar[list[dict]] = [
+        {
+            **s,
+            "description": (
+                "Create a new memory block. Default: synthesize the full exchange above "
+                "(user message + your reply in one coherent block). Split into multiple "
+                "blocks only when the exchange has clearly separate topics or only one "
+                "side is worth remembering. Prefer augment() when a related block exists. "
+                "Set novelty high (close to 1.0) for unique, surprising, or critical "
+                "information; low (close to 0.0) for routine or redundant information."
+            ),
+        }
+        if s["name"] == "store"
+        else s
+        for s in SCHEMAS
+        if s["name"] in {"store", "augment", "update_novelty"}
+    ]
+
     def __init__(self, context_manager: ContextManager) -> None:
         self._cm = context_manager
 

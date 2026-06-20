@@ -69,6 +69,10 @@ class ContextManager:
         return self._store.used_tokens
 
     @property
+    def max_tokens(self) -> int:
+        return self._store.max_tokens
+
+    @property
     def budget_pressure(self) -> str:
         return self._store.budget_pressure
 

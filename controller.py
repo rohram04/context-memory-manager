@@ -22,9 +22,6 @@ class MemoryController:
         self._cm = context_manager
         self._compress_fn = compress_fn
         self._merge_fn = merge_fn
-        # Optional LLM judge for augmentation. When set (and config.llm_augment_decision),
-        # it decides augment-vs-insert over the top-k similar candidates instead of a
-        # fixed cosine cutoff. Falls back to the cosine path when None.
         self._augment_decision_fn = augment_decision_fn
         self._config = config or context_manager.config
         # Configure the shared decay clock for this run: wall-clock by default,
@@ -94,13 +91,7 @@ class MemoryController:
         novelty_score: float,
         similarity_threshold: float | None = None,
     ) -> CacheBlock:
-        """Merge into a similar block, or insert as a new block.
-
-        LLM-judged path (default, when an augment_decision_fn is injected): retrieve the
-        top-k similar in-context blocks above a low floor and let the LLM decide whether
-        the content belongs to one of them or is a distinct topic. Otherwise fall back to
-        the fixed cosine-threshold path.
-        """
+        """Merge into a similar block, or insert as a new block."""
         cfg = self._config
         if cfg.llm_augment_decision and self._augment_decision_fn is not None:
             candidates = self._cm.find_top_k(
