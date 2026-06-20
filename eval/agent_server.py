@@ -35,6 +35,7 @@ from functions.llm_fns import make_compress_fn, make_merge_fn  # noqa: E402
 from llm.interface import LLMBackend  # noqa: E402
 from llm_client import has_llm_key, make_llm_backend  # noqa: E402
 from memory.block import _enc  # shared tiktoken cl100k_base encoder  # noqa: E402
+from memory.embeddings import make_embedder  # noqa: E402
 from memory.longterm import LongTermStore  # noqa: E402
 from memory.novelty import NoveltyMode  # noqa: E402
 from memory.store import ContextStore  # noqa: E402
@@ -284,7 +285,7 @@ def main() -> None:
         backend = make_llm_backend()
 
     print(f"[agent_server] loading embedding model: {args.embedding_model}", flush=True)
-    embedder = SentenceTransformer(args.embedding_model)
+    embedder = make_embedder(args.embedding_model)
 
     state = ServerState(
         backend=backend,

@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Callable
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from memory.block import CacheBlock, LongTermBlock
 from memory.config import MemoryConfig
+from memory.embeddings import Embedder, make_embedder
 from memory.longterm import LongTermStore
 from memory.store import ContextStore
 
@@ -35,7 +35,7 @@ class ContextManager:
         self,
         store: ContextStore,
         lt_store: LongTermStore,
-        embedding_model: str | SentenceTransformer = "all-MiniLM-L6-v2",
+        embedding_model: str | Embedder = "all-MiniLM-L6-v2",
         config: MemoryConfig | None = None,
         union_merge_fn: Callable[[str, str], str] | None = None,
     ) -> None:
@@ -43,11 +43,10 @@ class ContextManager:
         self._lt = lt_store
         # Default to the store's config so both layers share one source of truth.
         self._config = config or store.config
-        self._embedder = (
-            embedding_model
-            if isinstance(embedding_model, SentenceTransformer)
-            else SentenceTransformer(embedding_model)
-        )
+        # Accept any embedder instance (SentenceTransformer, OpenAIEmbedder, ...)
+        # or a string spec resolved by make_embedder (local ST name, or an OpenAI
+        # model like "text-embedding-3-small" / "openai:<model>").
+        self._embedder = make_embedder(embedding_model)
         # Lossless union used to reconcile a divergent context block back into LT.
         # Default keeps tests / the free eval path LLM-free and never loses info.
         self._union_merge_fn = union_merge_fn or _concat_union
