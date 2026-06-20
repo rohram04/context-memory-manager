@@ -3,11 +3,12 @@ from __future__ import annotations
 from enum import Enum
 from typing import Callable, Iterator
 
-import anthropic
 import tiktoken
 
 from controller import MemoryController
 from functions.memory_tools import MemoryTools
+from llm.interface import LLMBackend
+from llm.tool_loop import run_tool_loop
 from memory.novelty import NoveltyMode, build_novelty_fn
 
 # Same encoder CacheBlock.token_cost uses, so the room check in PREP matches the
@@ -90,19 +91,13 @@ def _format_exchange(user_message: str, reply: str) -> str:
     return f"User: {user_message}\n\nAssistant: {reply}"
 
 
-def _extract_text(content: list) -> str:
-    """Concatenate every text block in a response (text can be split across
-    multiple blocks when interleaved with tool_use); empty string if none."""
-    return "".join(block.text for block in content if hasattr(block, "text"))
-
-
 class Agent:
     """Turn-by-turn conversation loop with pluggable memory management mode."""
 
     def __init__(
         self,
         controller: MemoryController,
-        client: anthropic.Anthropic,
+        backend: LLMBackend,
         model: str = "claude-sonnet-4-6",
         mode: MemoryMode = MemoryMode.ALGORITHMIC,
         novelty_mode: NoveltyMode = NoveltyMode.EMBEDDING,
@@ -114,11 +109,11 @@ class Agent:
     ) -> None:
         self._controller = controller
         self._on_receive = on_receive
-        self._client = client
+        self._backend = backend
         self._model = model
         self._mode = mode
         self._novelty_fn = build_novelty_fn(
-            novelty_mode, controller._cm, client, novelty_model
+            novelty_mode, controller._cm, backend, novelty_model
         )
         self._tools = MemoryTools(controller._cm)
         self._system_prompt = system_prompt
@@ -158,18 +153,15 @@ class Agent:
 
     def _stream_model_call(self, messages, system, tools=None):
         """Stream one model call. Yields ("token", delta) per text delta, then
-        ("final", final_message) with the completed message (stop_reason +
-        content blocks)."""
-        kwargs = dict(
-            model=self._model, max_tokens=4096, system=system, messages=messages
-        )
-        if tools is not None:
-            kwargs["tools"] = tools
-        with self._client.messages.stream(**kwargs) as stream:
-            for delta in stream.text_stream:
-                yield ("token", delta)
-            final = stream.get_final_message()
-        yield ("final", final)
+        ("final", final_message) with the completed message."""
+        for event in self._backend.stream_complete(
+            model=self._model,
+            messages=messages,
+            system=system,
+            max_tokens=4096,
+            tools=tools,
+        ):
+            yield event
 
     def stream_chat(self, user_message: str) -> Iterator[dict]:
         """Streamed analogue of chat(): yields demo-agnostic events
@@ -248,13 +240,13 @@ class Agent:
         if self._on_receive:
             self._on_receive("user", user_message)
         # Context = memory blocks (system) + only the current turn (see note above).
-        response = self._client.messages.create(
+        response = self._backend.complete(
             model=self._model,
             max_tokens=4096,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_message}],
         )
-        text = _extract_text(response.content)
+        text = response.text
         text_embedding = self._controller.embed(text)
         self._controller.receive(
             text, text_embedding, self._novelty_fn(text, text_embedding)
@@ -264,35 +256,16 @@ class Agent:
         return text
 
     def _blocking_tool_loop(self, messages, instructions, tools) -> str:
-        """Blocking tool loop until end_turn. Returns accumulated assistant text and
-        mutates `messages`. System prompt rebuilt each iteration to reflect memory state."""
-        text = ""
-        for _ in range(self._max_tool_iterations):
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=4096,
-                system=self._build_system_prompt(instructions),
-                messages=messages,
-                tools=tools,
-            )
-            text += _extract_text(response.content)
-            if response.stop_reason == "end_turn":
-                return text
-            if response.stop_reason == "tool_use":
-                tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        result = self._tools.dispatch(block.name, block.input)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result,
-                        })
-                messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user", "content": tool_results})
-                continue
-            break
-        return text
+        """Blocking tool loop until end_turn. Returns accumulated assistant text."""
+        return run_tool_loop(
+            self._backend,
+            model=self._model,
+            messages=messages,
+            system=self._build_system_prompt(instructions),
+            tools=tools,
+            dispatch=self._tools.dispatch,
+            max_iterations=self._max_tool_iterations,
+        )
 
     def _llm_prep_phase(self, user_message: str) -> None:
         """Phase 1 — SURFACE + FREE BUDGET. Loop the LLM (query_lt/promote/compress/evict)
@@ -339,13 +312,13 @@ class Agent:
 
         self._llm_prep_phase(user_message)
 
-        response = self._client.messages.create(
+        response = self._backend.complete(
             model=self._model,
             max_tokens=4096,
-            system=self._build_system_prompt(""),  # base + memory prompt, no phase instructions
+            system=self._build_system_prompt(""),
             messages=[{"role": "user", "content": user_message}],
         )
-        reply = _extract_text(response.content)
+        reply = response.text
 
         self._llm_persist_phase(user_message, reply)
 

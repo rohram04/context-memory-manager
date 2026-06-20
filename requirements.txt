@@ -4,6 +4,7 @@ sqlalchemy
 numpy
 psycopg2-binary
 anthropic
+openai
 sentence-transformers
 litellm[proxy]
 letta-client>=1.0  # optional: eval/niah_live.py Letta baseline

@@ -4,8 +4,9 @@ import re
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
-import anthropic
 import numpy as np
+
+from llm.interface import LLMBackend
 
 if TYPE_CHECKING:
     from ContextManager import ContextManager
@@ -75,13 +76,6 @@ def _parse_float(text: str, fallback: float = 0.5) -> float:
         return fallback
 
 
-def _extract_text(content: list) -> str:
-    for block in content:
-        if hasattr(block, "text"):
-            return block.text
-    return ""
-
-
 def score_novelty_embedding(
     embedding: list[float],
     cm: ContextManager,
@@ -148,19 +142,11 @@ def score_novelty_retrieval_llm(
     content: str,
     embedding: list[float],
     cm: ContextManager,
-    client: anthropic.Anthropic,
+    backend: LLMBackend,
     model: str = "claude-haiku-4-5-20251001",
     top_k: int = 5,
 ) -> float:
-    """Retrieval-grounded LLM novelty scoring.
-
-    Retrieves the top-k nearest blocks (context + LT) and asks the LLM to grade
-    novelty against those specific neighbors plus the broader conversation. More
-    precise and bounded than score_novelty_llm (which dumps the whole memory),
-    and unlike pure embedding novelty it can recognise that a near-duplicate which
-    *contradicts/updates* an existing fact is actually highly novel.
-    Falls back to embedding novelty on any API or parse failure.
-    """
+    """Retrieval-grounded LLM novelty scoring."""
     neighbors = _top_k_neighbors(embedding, cm, top_k)
     if neighbors:
         neighbor_text = "\n".join(
@@ -169,7 +155,7 @@ def score_novelty_retrieval_llm(
     else:
         neighbor_text = "  (memory is empty — nothing to compare against)"
     try:
-        response = client.messages.create(
+        response = backend.complete(
             model=model,
             max_tokens=16,
             messages=[{
@@ -181,7 +167,7 @@ def score_novelty_retrieval_llm(
                 ),
             }],
         )
-        return _parse_float(_extract_text(response.content))
+        return _parse_float(response.text)
     except Exception:
         return score_novelty_embedding(embedding, cm, top_k)
 
@@ -189,17 +175,12 @@ def score_novelty_retrieval_llm(
 def score_novelty_llm(
     content: str,
     memory_summary: str,
-    client: anthropic.Anthropic,
+    backend: LLMBackend,
     model: str = "claude-haiku-4-5-20251001",
 ) -> float:
-    """Score novelty via LLM call.
-
-    Captures contradiction, surprise, and significance that embedding similarity
-    cannot detect. Uses a small model (Haiku by default) to keep latency low.
-    Falls back to 0.5 on any API or parse failure.
-    """
+    """Score novelty via LLM call."""
     try:
-        response = client.messages.create(
+        response = backend.complete(
             model=model,
             max_tokens=16,
             messages=[{
@@ -210,7 +191,7 @@ def score_novelty_llm(
                 ),
             }],
         )
-        return _parse_float(_extract_text(response.content))
+        return _parse_float(response.text)
     except Exception:
         return 0.5
 
@@ -219,35 +200,25 @@ def score_novelty_hybrid(
     content: str,
     embedding: list[float],
     cm: ContextManager,
-    client: anthropic.Anthropic,
+    backend: LLMBackend,
     model: str = "claude-haiku-4-5-20251001",
     ambiguity_range: tuple[float, float] = (0.35, 0.65),
 ) -> float:
-    """Score novelty using embedding similarity, with LLM fallback for ambiguous cases.
-
-    Most blocks are clearly novel or clearly redundant — the LLM is only called
-    for the ambiguous middle band, keeping costs low while capturing edge cases
-    embeddings miss (contradiction, significance, surprise).
-    """
+    """Score novelty using embedding similarity, with LLM fallback for ambiguous cases."""
     emb_score = score_novelty_embedding(embedding, cm)
     lo, hi = ambiguity_range
     if lo <= emb_score <= hi:
-        return score_novelty_llm(content, cm.build_memory_prompt(), client, model)
+        return score_novelty_llm(content, cm.build_memory_prompt(), backend, model)
     return emb_score
 
 
 def build_novelty_fn(
     mode: NoveltyMode,
     cm: ContextManager,
-    client: anthropic.Anthropic,
+    backend: LLMBackend,
     novelty_model: str = "claude-haiku-4-5-20251001",
 ) -> Callable[[str, list[float]], float]:
-    """Factory: returns a novelty_fn closure for the given mode.
-
-    The closure takes (content, embedding) — embedding is precomputed by the
-    caller so it isn't re-derived inside novelty scoring and downstream receive().
-    LLM mode ignores the embedding argument.
-    """
+    """Factory: returns a novelty_fn closure for the given mode."""
     cfg = cm.config
     if mode == NoveltyMode.EMBEDDING:
         return lambda content, embedding: score_novelty_embedding(
@@ -255,13 +226,12 @@ def build_novelty_fn(
         )
     if mode == NoveltyMode.LLM:
         return lambda content, embedding: score_novelty_llm(
-            content, cm.build_memory_prompt(), client, novelty_model
+            content, cm.build_memory_prompt(), backend, novelty_model
         )
     if mode == NoveltyMode.RETRIEVAL_LLM:
         return lambda content, embedding: score_novelty_retrieval_llm(
-            content, embedding, cm, client, novelty_model, cfg.novelty_retrieval_top_k
+            content, embedding, cm, backend, novelty_model, cfg.novelty_retrieval_top_k
         )
-    # HYBRID
     return lambda content, embedding: score_novelty_hybrid(
-        content, embedding, cm, client, novelty_model, cfg.novelty_hybrid_band
+        content, embedding, cm, backend, novelty_model, cfg.novelty_hybrid_band
     )

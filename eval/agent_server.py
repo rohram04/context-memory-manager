@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import anthropic
 import uvicorn
 from dotenv import dotenv_values
 from fastapi import FastAPI, Query
@@ -33,6 +32,8 @@ from agent import Agent, MemoryMode  # noqa: E402
 from ContextManager import ContextManager  # noqa: E402
 from controller import MemoryController  # noqa: E402
 from functions.llm_fns import make_compress_fn, make_merge_fn  # noqa: E402
+from llm.interface import LLMBackend  # noqa: E402
+from llm_client import has_llm_key, make_llm_backend  # noqa: E402
 from memory.block import _enc  # shared tiktoken cl100k_base encoder  # noqa: E402
 from memory.longterm import LongTermStore  # noqa: E402
 from memory.novelty import NoveltyMode  # noqa: E402
@@ -70,7 +71,7 @@ class SendMessageResponse(BaseModel):
 class ServerState:
     def __init__(
         self,
-        client: anthropic.Anthropic,
+        backend: LLMBackend,
         embedder: SentenceTransformer,
         default_mode: MemoryMode,
         max_tokens: int,
@@ -78,7 +79,7 @@ class ServerState:
         util_model: str,
         novelty_mode: NoveltyMode,
     ) -> None:
-        self.client = client
+        self.backend = backend
         self.embedder = embedder
         self.default_mode = default_mode
         self.max_tokens = max_tokens
@@ -108,12 +109,12 @@ class ServerState:
         cm = ContextManager(store, lt_store, embedding_model=self.embedder)
         controller = MemoryController(
             cm,
-            compress_fn=make_compress_fn(self.client, self.util_model),
-            merge_fn=make_merge_fn(self.client, cm, self.util_model),
+            compress_fn=make_compress_fn(self.backend, self.util_model),
+            merge_fn=make_merge_fn(self.backend, cm, self.util_model),
         )
         agent = Agent(
             controller,
-            self.client,
+            self.backend,
             model=self.model,
             mode=mode,
             novelty_mode=self.novelty_mode,
@@ -271,19 +272,22 @@ def main() -> None:
         print(f"[agent_server] cleared {len(stale)} stale context DB(s)", flush=True)
 
     if args.local:
-        client = anthropic.Anthropic(api_key="local", base_url=args.local_base_url)
-        # Route both the main model and util model through the local proxy.
+        backend = make_llm_backend(
+            local=True,
+            local_base_url=args.local_base_url,
+        )
         args.model = args.local_model
         args.util_model = args.local_model
     else:
-        api_key = _load_api_key()
-        client = anthropic.Anthropic(api_key=api_key)
+        if not has_llm_key():
+            _load_api_key()
+        backend = make_llm_backend()
 
     print(f"[agent_server] loading embedding model: {args.embedding_model}", flush=True)
     embedder = SentenceTransformer(args.embedding_model)
 
     state = ServerState(
-        client=client,
+        backend=backend,
         embedder=embedder,
         default_mode=MemoryMode(args.mode),
         max_tokens=args.max_tokens,

@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from ContextManager import ContextManager
+from llm.types import LLMResponse
 from memory.block import CacheBlock
 from memory.config import MemoryConfig
 from memory.longterm import LongTermStore
@@ -22,30 +23,22 @@ from memory.novelty import NoveltyMode, build_novelty_fn, score_novelty_retrieva
 from memory.store import ContextStore
 
 
-class _FakeContent:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _FakeResponse:
-    def __init__(self, text: str) -> None:
-        self.content = [_FakeContent(text)]
-
-
-class _FakeClient:
+class _FakeBackend:
     """Captures the last prompt; returns a canned text or raises if boom=True."""
 
     def __init__(self, reply: str = "0.9", boom: bool = False) -> None:
         self.reply = reply
         self.boom = boom
         self.last_prompt: str | None = None
-        self.messages = self
 
-    def create(self, **kwargs):  # mimics client.messages.create
+    def complete(self, **kwargs) -> LLMResponse:
         if self.boom:
             raise RuntimeError("simulated API failure")
         self.last_prompt = kwargs["messages"][0]["content"]
-        return _FakeResponse(self.reply)
+        return LLMResponse(text=self.reply)
+
+    def stream_complete(self, **kwargs):
+        raise NotImplementedError
 
 
 def _build_cm() -> ContextManager:
@@ -62,15 +55,15 @@ def test_retrieval_novelty_injects_neighbors_and_parses() -> None:
     emb = cm.embed(text)
     cm.insert(CacheBlock(content=text, original_embedding=emb, novelty_score=0.5))
 
-    client = _FakeClient(reply="0.9")
+    backend = _FakeBackend(reply="0.9")
     new = "Update: the Helix-9 protocol passed its pressure test after all."
-    score = score_novelty_retrieval_llm(new, cm.embed(new), cm, client, "m", top_k=5)
+    score = score_novelty_retrieval_llm(new, cm.embed(new), cm, backend, "m", top_k=5)
 
     assert abs(score - 0.9) < 1e-6, score
-    assert client.last_prompt is not None
+    assert backend.last_prompt is not None
     # The nearest neighbor's content must appear in the grounded prompt.
-    assert "Helix-9 protocol failed" in client.last_prompt
-    assert new in client.last_prompt
+    assert "Helix-9 protocol failed" in backend.last_prompt
+    assert new in backend.last_prompt
 
 
 def test_retrieval_novelty_falls_back_on_error() -> None:
@@ -78,7 +71,7 @@ def test_retrieval_novelty_falls_back_on_error() -> None:
     t = "An unrelated fact about tidal estuaries."
     cm.insert(CacheBlock(content=t, original_embedding=cm.embed(t), novelty_score=0.5))
 
-    boom = _FakeClient(boom=True)
+    boom = _FakeBackend(boom=True)
     new = "A completely different topic: medieval glassblowing in Murano."
     score = score_novelty_retrieval_llm(new, cm.embed(new), cm, boom, "m")
     # Falls back to embedding novelty -> a valid [0,1] score, and high (dissimilar).
@@ -88,8 +81,8 @@ def test_retrieval_novelty_falls_back_on_error() -> None:
 
 def test_factory_wires_retrieval_mode() -> None:
     cm = _build_cm()
-    client = _FakeClient(reply="0.42")
-    fn = build_novelty_fn(NoveltyMode.RETRIEVAL_LLM, cm, client, "m")
+    backend = _FakeBackend(reply="0.42")
+    fn = build_novelty_fn(NoveltyMode.RETRIEVAL_LLM, cm, backend, "m")
     s = fn("some content", cm.embed("some content"))
     assert abs(s - 0.42) < 1e-6, s
 
