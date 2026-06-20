@@ -98,10 +98,11 @@ examples:
     parser.add_argument(
         "--embedding-model",
         default="all-MiniLM-L6-v2",
-        help="Embedding model for novelty, similarity, and promotion. A "
-        "sentence-transformers name runs locally (default all-MiniLM-L6-v2, "
-        "384-dim); 'text-embedding-3-small' or 'openai:<model>' uses OpenAI "
-        "embeddings (1536-dim, needs OPENAI_API_KEY).",
+        help="Embedding model for novelty, similarity, and promotion. "
+        "A sentence-transformers name runs locally (default all-MiniLM-L6-v2, 384-dim). "
+        "'text-embedding-3-small' or 'openai:<model>' hits api.openai.com (needs OPENAI_API_KEY). "
+        "'openrouter:<model>' (e.g. 'openrouter:openai/text-embedding-3-small') routes "
+        "through OpenRouter (needs OPENROUTER_API_KEY).",
     )
     parser.add_argument(
         "--backend",

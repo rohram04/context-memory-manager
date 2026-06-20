@@ -63,6 +63,21 @@ def test_make_embedder_routes_openai_specs(monkeypatch):
     assert make_embedder("text-embedding-3-small").model == "text-embedding-3-small"
 
 
+def test_make_embedder_routes_openrouter_specs(monkeypatch):
+    captured = _install_fake_openai(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+
+    for spec in ("openrouter:openai/text-embedding-3-small", "openrouter/openai/text-embedding-3-large"):
+        emb = make_embedder(spec)
+        assert isinstance(emb, OpenAIEmbedder)
+
+    emb = make_embedder("openrouter:openai/text-embedding-3-small")
+    assert emb.model == "openai/text-embedding-3-small"
+    # Verify the client was initialised with the OpenRouter base URL and key.
+    assert captured["base_url"] == "https://openrouter.ai/api/v1"
+    assert captured["api_key"] == "or-test-key"
+
+
 def test_make_embedder_rejects_bad_spec():
     with pytest.raises(TypeError):
         make_embedder(123)  # not a str, no .encode
