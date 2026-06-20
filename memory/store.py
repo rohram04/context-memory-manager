@@ -101,12 +101,14 @@ class ContextStore:
     # ------------------------------------------------------------------
 
     def next_candidate(self) -> CacheBlock | None:
-        while self._heap:
-            _, block_id = self._heap[0]
-            if block_id in self._blocks:
-                return self._blocks[block_id]
-            heapq.heappop(self._heap)
-        return None
+        # Priority depends on decay_score, which is time-varying: it changes every
+        # clock tick even when no block is added/removed/accessed. Cached heap
+        # ordering from an earlier turn is therefore stale, so re-sort against the
+        # current clock before selecting the highest-priority candidate.
+        if not self._blocks:
+            return None
+        self._rebuild()
+        return self._blocks[self._heap[0][1]]
 
     # ------------------------------------------------------------------
     # Similarity search (augmentation candidate)

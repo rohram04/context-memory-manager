@@ -228,10 +228,12 @@ def _parse_accumulated_tool_calls(acc: dict[int, dict]) -> list[ToolCall]:
 
 
 def _map_finish_reason(finish_reason: str | None, tool_calls: list[ToolCall]) -> StopReason:
-    if finish_reason == "tool_calls" or (tool_calls and finish_reason is None):
+    # Tool calls take precedence over the textual finish_reason. Some OpenRouter
+    # providers report finish_reason="stop" even when tool calls were emitted, so
+    # checking "stop" first would map to END_TURN and silently drop the calls
+    # without ever dispatching them.
+    if tool_calls or finish_reason == "tool_calls":
         return StopReason.TOOL_USE
     if finish_reason == "stop":
         return StopReason.END_TURN
-    if tool_calls:
-        return StopReason.TOOL_USE
     return StopReason.OTHER
