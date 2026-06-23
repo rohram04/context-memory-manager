@@ -276,6 +276,10 @@ System B    →  This system, LLM decides eviction
 System C    →  This system, hybrid (algorithm nominates, LLM confirms)
 ```
 
+### External benchmark harness — LongMemEval vs mem0 (`~/memory-benchmarks`)
+
+A live head-to-head against **mem0** (beyond the simulated MemGPT/FIFO baseline) runs through the separate `memory-benchmarks` harness, integrated via `benchmarks/common/mm_bridge.py` + a `--backend memorymanager` path in `benchmarks/longmemeval/run.py`. Only the memory system varies: conversation chunks, answerer (`gpt-4o`), judge (`gpt-4o-mini`), and embedder (`text-embedding-3-small`) are held identical to the mem0 OSS run, and the whole stack — MM chat, MM embeddings, the harness answerer/judge, and the mem0 server — routes through **OpenRouter** on a single key (no OpenAI key). The bridge drives `Agent` directly (`ingest`/PREP/PERSIST for memory; the harness answerer generates the answer, MM's REPLY phase bypassed). Requires the MM checkout on `main` for the `memory/embeddings.py` Embedder abstraction. Full setup + run commands: **`~/memory-benchmarks/CLAUDE.md`**.
+
 ### Key Metrics
 - **Memory fidelity** — recall accuracy of facts stored earlier in conversation
 - **Token efficiency** — useful content tokens / total context tokens
