@@ -75,6 +75,7 @@ class LongTermStore:
                         novelty_score      REAL    NOT NULL,
                         access_count       INTEGER NOT NULL DEFAULT 0,
                         last_accessed      TEXT,
+                        source_date        TEXT,
                         created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
                         is_reconstructed   INTEGER NOT NULL DEFAULT 0,
                         original_embedding BLOB
@@ -91,6 +92,7 @@ class LongTermStore:
                         novelty_score      FLOAT   NOT NULL,
                         access_count       INT     NOT NULL DEFAULT 0,
                         last_accessed      TIMESTAMPTZ,
+                        source_date        TIMESTAMPTZ,
                         created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
                         is_reconstructed   BOOLEAN NOT NULL DEFAULT FALSE,
                         original_embedding vector({self._embedding_dim})
@@ -119,12 +121,14 @@ class LongTermStore:
             return {
                 **base,
                 "last_accessed": block.last_accessed.isoformat(),
+                "source_date": block.source_date.isoformat() if block.source_date else None,
                 "is_reconstructed": int(block.is_reconstructed),
                 "original_embedding": _pack_vec(block.original_embedding),
             }
         return {
             **base,
             "last_accessed": block.last_accessed,
+            "source_date": block.source_date,
             "is_reconstructed": block.is_reconstructed,
             "original_embedding": _pg_vec_str(block.original_embedding),
         }
@@ -137,6 +141,12 @@ class LongTermStore:
             last_accessed = CLOCK.now()
         if last_accessed.tzinfo is None:
             last_accessed = last_accessed.replace(tzinfo=UTC)
+
+        source_date = row.get("source_date")
+        if isinstance(source_date, str):
+            source_date = datetime.fromisoformat(source_date)
+        if source_date is not None and source_date.tzinfo is None:
+            source_date = source_date.replace(tzinfo=UTC)
 
         if self._dialect == "sqlite":
             original_embedding = _unpack_vec(row.get("original_embedding"))
@@ -152,6 +162,7 @@ class LongTermStore:
             novelty_score=row["novelty_score"],
             access_count=row["access_count"],
             last_accessed=last_accessed,
+            source_date=source_date,
             is_reconstructed=is_reconstructed,
             original_embedding=original_embedding,
         )
@@ -166,11 +177,11 @@ class LongTermStore:
             conn.execute(text("""
                 INSERT INTO lt_blocks
                     (id, content, fidelity, compression_count, novelty_score,
-                     access_count, last_accessed, is_reconstructed,
+                     access_count, last_accessed, source_date, is_reconstructed,
                      original_embedding)
                 VALUES
                     (:id, :content, :fidelity, :compression_count, :novelty_score,
-                     :access_count, :last_accessed, :is_reconstructed,
+                     :access_count, :last_accessed, :source_date, :is_reconstructed,
                      :original_embedding)
             """), row)
             conn.commit()
@@ -191,6 +202,7 @@ class LongTermStore:
                     content=:content, fidelity=:fidelity,
                     compression_count=:compression_count, novelty_score=:novelty_score,
                     access_count=:access_count, last_accessed=:last_accessed,
+                    source_date=:source_date,
                     is_reconstructed=:is_reconstructed,
                     original_embedding=:original_embedding
                 WHERE id=:id

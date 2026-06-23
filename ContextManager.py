@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable
 
 import numpy as np
@@ -50,10 +51,22 @@ class ContextManager:
         # Lossless union used to reconcile a divergent context block back into LT.
         # Default keeps tests / the free eval path LLM-free and never loses info.
         self._union_merge_fn = union_merge_fn or _concat_union
+        # Ambient real-world date stamped onto blocks created/augmented while set.
+        # The caller (e.g. the ingest loop) sets this to the source date of the
+        # content currently being ingested; covers both the algorithmic and the
+        # LLM (store/augment tool) creation paths without per-call plumbing.
+        self._current_source_date: datetime | None = None
 
     @property
     def config(self) -> MemoryConfig:
         return self._config
+
+    def set_source_date(self, source_date: datetime | None) -> None:
+        """Set the real-world date stamped onto blocks created/augmented next.
+
+        Pass None to stop stamping (e.g. at query time).
+        """
+        self._current_source_date = source_date
 
     def embed(self, text: str) -> list[float]:
         """Embed text via the owned sentence-transformer model."""
@@ -88,6 +101,8 @@ class ContextManager:
 
     def insert(self, block: CacheBlock) -> None:
         """Add a block to context. Budget management is the caller's responsibility."""
+        if block.source_date is None:
+            block.source_date = self._current_source_date
         self._store.add(block)
 
     def reconcile_to_lt(self, block: CacheBlock, *, refresh_block: bool) -> None:
@@ -141,6 +156,10 @@ class ContextManager:
         block.current_embedding = embedding
         block.fidelity = 1.0
         block.dirty = True
+        # A re-mention updates the block's source date to the new content's date so
+        # date-ordering reflects the most recent time the fact was stated.
+        if self._current_source_date is not None:
+            block.source_date = self._current_source_date
         # A merge is an access: refresh access_count + last_accessed so re-mentioned
         # facts gain recency/frequency weight (record_access also re-sorts the heap).
         block.record_access()
@@ -198,6 +217,7 @@ class ContextManager:
                 novelty_score=block.novelty_score,
                 access_count=block.access_count,
                 last_accessed=block.last_accessed,
+                source_date=block.source_date,
             )
             self._lt.add(lt_block)
             block.pointer_to_lt_id = lt_block.id
@@ -269,6 +289,7 @@ class ContextManager:
             compression_count=lt_block.compression_count,
             pointer_to_lt_id=lt_block_id,
             novelty_score=lt_block.novelty_score,
+            source_date=lt_block.source_date,
         )
         self.insert(block)
         self._store.access(block.id)
@@ -293,6 +314,7 @@ class ContextManager:
                 novelty_score=block.novelty_score,
                 access_count=block.access_count,
                 last_accessed=block.last_accessed,
+                source_date=block.source_date,
             )
             self._lt.add(lt_block)
             block.pointer_to_lt_id = lt_block.id
