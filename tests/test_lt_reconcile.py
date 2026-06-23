@@ -22,6 +22,7 @@ import numpy as np
 
 from ContextManager import ContextManager
 from memory.block import CacheBlock
+from memory.clock import CLOCK
 from memory.config import MemoryConfig
 from memory.longterm import LongTermStore
 from memory.store import ContextStore
@@ -181,6 +182,56 @@ def test_roundtrip_augmented_fact_recoverable_after_removal() -> None:
     # And it is retrievable via similarity search.
     hits = cm._lt.similarity_search(cm.embed(f"Late-breaking {TOK_AUG}"), top_k=1)
     assert hits and TOK_AUG in hits[0][0].content
+
+
+def test_promote_records_access_on_context_block() -> None:
+    """Promotion must refresh in-context recency (not just LT access)."""
+    CLOCK.reset(600.0)
+    cm = _build_cm()
+    block = _insert(cm, f"Original {TOK_ORIG}")
+    r1 = cm.compress(block.id, _survivable_compress(TOK_ORIG))
+    pointer = r1.pointer_to_lt_id
+    assert cm._store.get(block.id) is not None
+
+    CLOCK.tick()
+    CLOCK.tick()
+    CLOCK.tick()
+    aged_decay = cm._store.get(block.id).decay_score
+
+    promoted = cm.promote(pointer)
+    assert promoted is not None
+    assert promoted.access_count >= 1
+    assert promoted.decay_score > aged_decay
+    assert promoted.decay_score > 0.99
+
+    # New-block path: fully evict stub, then promote from LT.
+    cm.evict(promoted.id)
+    assert cm._store.get(promoted.id) is None
+    promoted2 = cm.promote(pointer)
+    assert promoted2 is not None
+    assert promoted2.access_count >= 1
+    assert promoted2.decay_score > 0.99
+    CLOCK.reset(0.0)
+
+
+def test_compress_low_fidelity_guard_reconciles_dirty_block() -> None:
+    """Early compress() fidelity guard must reconcile dirty blocks before removal."""
+    cm = _build_cm()
+    block = _insert(cm, f"Original {TOK_ORIG}")
+    r1 = cm.compress(block.id, _survivable_compress(TOK_ORIG))
+    pointer = r1.pointer_to_lt_id
+    assert cm._store.get(block.id) is not None
+
+    _augment(cm, block, f"compact note {TOK_ORIG}\nStale guard {TOK_AUG}")
+    stub = cm._store.get(block.id)
+    assert stub is not None and stub.dirty is True
+    stub.fidelity = 0.1  # simulates stale heap entry still in context
+
+    cm.compress(block.id, "ignored summary")
+    assert cm._store.get(block.id) is None
+    lt = cm._lt.get(pointer)
+    assert TOK_ORIG in lt.content, lt.content
+    assert TOK_AUG in lt.content, lt.content
 
 
 def _run_all() -> None:

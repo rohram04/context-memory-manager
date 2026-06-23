@@ -184,8 +184,7 @@ class ContextManager:
             return None
 
         if block.fidelity < self._config.fidelity_removal_threshold:
-            self._store.remove(block.id)
-            return block
+            return self.evict(block_id)
 
         if block.pointer_to_lt_id is None:
             # First compression pass: copy the current (full, possibly augmented)
@@ -258,7 +257,7 @@ class ContextManager:
                 # Under the invariant the stub now mirrors LT's content; keep
                 # current_embedding describing it.
                 stub.current_embedding = lt_block.original_embedding
-            self._store.update_priority(stub.id)
+            self._store.access(stub.id)
             self._lt.access(lt_block_id)
             return stub
 
@@ -272,6 +271,7 @@ class ContextManager:
             novelty_score=lt_block.novelty_score,
         )
         self.insert(block)
+        self._store.access(block.id)
         self._lt.access(lt_block_id)
         return block
 
