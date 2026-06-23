@@ -28,6 +28,10 @@ class CacheBlock(BaseModel):
     novelty_score: float
     access_count: int = 0
     last_accessed: datetime = Field(default_factory=lambda: CLOCK.now())
+    # Real-world date the memory's content originates from (e.g. the conversation
+    # session date). Independent of last_accessed/decay; used to date-order memories
+    # when they are surfaced to a downstream reader (e.g. an answerer prompt).
+    source_date: datetime | None = None
     dirty: bool = False  # content gained info not yet reconciled to LT
 
     @model_validator(mode="after")
@@ -65,6 +69,9 @@ class LongTermBlock(BaseModel):
     novelty_score: float
     access_count: int = 0
     last_accessed: datetime = Field(default_factory=lambda: CLOCK.now())
+    # Real-world date of the memory's content (carried over from the CacheBlock on
+    # compress/evict, and back on promote). See CacheBlock.source_date.
+    source_date: datetime | None = None
     is_reconstructed: bool = False
 
     @computed_field
