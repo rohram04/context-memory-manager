@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Callable
 
@@ -61,12 +62,21 @@ class ContextManager:
     def config(self) -> MemoryConfig:
         return self._config
 
-    def set_source_date(self, source_date: datetime | None) -> None:
-        """Set the real-world date stamped onto blocks created/augmented next.
+    @contextmanager
+    def using_source_date(self, source_date: datetime | None):
+        """Scope: stamp the real-world ``source_date`` onto blocks created or
+        augmented inside this ``with`` block, restoring the prior value on exit.
 
-        Pass None to stop stamping (e.g. at query time).
+        Auto-reset (even on exception) and nesting-safe, so a date can never leak
+        past the content it belongs to. Named ``using_source_date`` to avoid
+        colliding with the ``source_date`` field on blocks.
         """
+        prev = self._current_source_date
         self._current_source_date = source_date
+        try:
+            yield
+        finally:
+            self._current_source_date = prev
 
     def embed(self, text: str) -> list[float]:
         """Embed text via the owned sentence-transformer model."""

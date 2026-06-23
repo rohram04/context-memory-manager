@@ -38,48 +38,67 @@ def _block(cm: ContextManager, content: str) -> CacheBlock:
 
 def test_insert_stamps_ambient_source_date():
     cm = _cm()
-    cm.set_source_date(D1)
     b = _block(cm, "fact one")
-    cm.insert(b)
+    with cm.using_source_date(D1):
+        cm.insert(b)
     assert cm._store.get(b.id).source_date == D1
 
 
 def test_insert_keeps_explicit_source_date_over_ambient():
     cm = _cm()
-    cm.set_source_date(D2)
     b = _block(cm, "fact")
     b.source_date = D1  # explicit wins
-    cm.insert(b)
+    with cm.using_source_date(D2):
+        cm.insert(b)
     assert cm._store.get(b.id).source_date == D1
+
+
+def test_using_source_date_restores_prior_value_on_exit():
+    cm = _cm()
+    with cm.using_source_date(D1):
+        with cm.using_source_date(D2):  # nesting-safe
+            assert cm._current_source_date == D2
+        assert cm._current_source_date == D1  # inner scope restored outer
+    assert cm._current_source_date is None  # outer scope restored default
+
+
+def test_using_source_date_restores_on_exception():
+    cm = _cm()
+    try:
+        with cm.using_source_date(D1):
+            raise ValueError("boom")
+    except ValueError:
+        pass
+    assert cm._current_source_date is None  # finally ran despite the error
 
 
 def test_augment_updates_source_date_to_latest_mention():
     cm = _cm()
-    cm.set_source_date(D1)
     b = _block(cm, "fact")
-    cm.insert(b)
-    cm.set_source_date(D2)
-    cm.augment(b.id, "fact, revised", cm.embed("fact, revised"))
+    with cm.using_source_date(D1):
+        cm.insert(b)
+    with cm.using_source_date(D2):
+        cm.augment(b.id, "fact, revised", cm.embed("fact, revised"))
     assert cm._store.get(b.id).source_date == D2
 
 
 def test_evict_then_promote_roundtrips_source_date_through_lt():
     cm = _cm()
-    cm.set_source_date(D1)
     b = _block(cm, "fact")
-    cm.insert(b)
-    cm.evict(b.id)
+    with cm.using_source_date(D1):
+        cm.insert(b)
+        cm.evict(b.id)
     lt_id = b.pointer_to_lt_id
     assert cm._lt.get(lt_id).source_date == D1  # survived serialization to LT
-    cm.set_source_date(None)  # query-time: no ambient date
+    # promote runs OUTSIDE any scope (query-time, no ambient date)
     promoted = cm.promote(lt_id)
     assert promoted.source_date == D1  # carried back, not overwritten
 
 
 def test_compress_copies_source_date_to_lt():
     cm = _cm()
-    cm.set_source_date(D1)
     b = _block(cm, "a reasonably long memory block about a fact")
-    cm.insert(b)
-    cm.compress(b.id, "short summary")
+    with cm.using_source_date(D1):
+        cm.insert(b)
+        cm.compress(b.id, "short summary")
     assert cm._lt.get(b.pointer_to_lt_id).source_date == D1
