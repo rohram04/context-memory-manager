@@ -287,6 +287,7 @@ class Agent:
 
     def _llm_persist_phase(self, user_message: str, reply: str) -> None:
         """Phase 3 — PERSIST + RESCORE."""
+        self._controller.tick()
         self._blocking_tool_loop(
             [
                 {"role": "user", "content": _format_exchange(user_message, reply)},

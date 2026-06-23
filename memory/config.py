@@ -45,9 +45,10 @@ class MemoryConfig:
 
     # --- logical clock (decay signal) ---------------------------------------
     # 0.0 => wall-clock time (production default; decay measured in real seconds).
-    # > 0  => simulated turn clock: each MemoryController.receive() advances time
-    #         by this many seconds. Lets decay differentiate blocks during fast
-    #         batch evals, where wall-clock dt is ~0 and every decay_score ~= 1.0.
+    # > 0  => simulated turn clock: each turn advances time by this many seconds
+    #         (MemoryController.receive() in algorithmic mode, or _llm_persist_phase
+    #         in LLM mode). Lets decay differentiate blocks during fast batch evals,
+    #         where wall-clock dt is ~0 and every decay_score ~= 1.0.
     # Relative to CacheBlock.DECAY_CONSTANT_S (3600s), a value of 600 means decay
     # reaches ~e^-1 after 6 turns.
     clock_seconds_per_turn: float = 0.0

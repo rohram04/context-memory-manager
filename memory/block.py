@@ -2,18 +2,39 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import uuid4
 
 import tiktoken
-from pydantic import BaseModel, ConfigDict, computed_field, Field, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field, Field, model_validator, PrivateAttr
 
-from memory.clock import CLOCK, UTC
+from memory.clock import UTC
+
+if TYPE_CHECKING:
+    from memory.clock import Clock
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
 
-class CacheBlock(BaseModel):
+class _ClockBoundBlock(BaseModel):
+    """Shared clock-binding helpers for CacheBlock and LongTermBlock."""
+
+    _clock: "Clock | None" = PrivateAttr(default=None)
+
+    def bind_clock(self, clock: "Clock") -> None:
+        object.__setattr__(self, "_clock", clock)
+        if self.last_accessed is None:
+            self.last_accessed = clock.now()
+
+    def _require_clock(self) -> "Clock":
+        if self._clock is None:
+            raise RuntimeError(
+                "Block has no clock; bind via store.add() or bind_clock() first."
+            )
+        return self._clock
+
+
+class CacheBlock(_ClockBoundBlock):
     model_config = ConfigDict(frozen=False)
 
     DECAY_CONSTANT_S: ClassVar[float] = 3600.0  # 1-hour characteristic decay
@@ -27,7 +48,7 @@ class CacheBlock(BaseModel):
     pointer_to_lt_id: str | None = None
     novelty_score: float
     access_count: int = 0
-    last_accessed: datetime = Field(default_factory=lambda: CLOCK.now())
+    last_accessed: datetime | None = None
     # Real-world date the memory's content originates from (e.g. the conversation
     # session date). Independent of last_accessed/decay; used to date-order memories
     # when they are surfaced to a downstream reader (e.g. an answerer prompt).
@@ -48,15 +69,18 @@ class CacheBlock(BaseModel):
     @computed_field
     @property
     def decay_score(self) -> float:
-        delta = (CLOCK.now() - self.last_accessed).total_seconds()
+        clock = self._require_clock()
+        assert self.last_accessed is not None
+        delta = (clock.now() - self.last_accessed).total_seconds()
         return math.exp(-delta / self.DECAY_CONSTANT_S)
 
     def record_access(self) -> None:
+        clock = self._require_clock()
         self.access_count += 1
-        self.last_accessed = CLOCK.now()
+        self.last_accessed = clock.now()
 
 
-class LongTermBlock(BaseModel):
+class LongTermBlock(_ClockBoundBlock):
     model_config = ConfigDict(frozen=False)
 
     DECAY_CONSTANT_S: ClassVar[float] = 86400.0 * 7  # 1-week characteristic decay
@@ -68,7 +92,7 @@ class LongTermBlock(BaseModel):
     compression_count: int = 0
     novelty_score: float
     access_count: int = 0
-    last_accessed: datetime = Field(default_factory=lambda: CLOCK.now())
+    last_accessed: datetime | None = None
     # Real-world date of the memory's content (carried over from the CacheBlock on
     # compress/evict, and back on promote). See CacheBlock.source_date.
     source_date: datetime | None = None
@@ -77,9 +101,12 @@ class LongTermBlock(BaseModel):
     @computed_field
     @property
     def decay_score(self) -> float:
-        delta = (CLOCK.now() - self.last_accessed).total_seconds()
+        clock = self._require_clock()
+        assert self.last_accessed is not None
+        delta = (clock.now() - self.last_accessed).total_seconds()
         return math.exp(-delta / self.DECAY_CONSTANT_S)
 
     def record_access(self) -> None:
+        clock = self._require_clock()
         self.access_count += 1
-        self.last_accessed = CLOCK.now()
+        self.last_accessed = clock.now()

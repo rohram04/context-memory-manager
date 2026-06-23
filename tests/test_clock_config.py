@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from memory.block import CacheBlock
-from memory.clock import CLOCK
+from memory.clock import Clock
 from memory.config import MemoryConfig
 from memory.store import ContextStore
 
@@ -25,48 +25,52 @@ def _block(content: str, novelty: float = 0.5) -> CacheBlock:
 
 def test_wall_clock_decay_is_inert_for_fast_creation() -> None:
     """Default (wall-clock) mode: blocks created back-to-back all read decay ~= 1.0."""
-    CLOCK.reset(0.0)
+    clock = Clock(0.0)
     a = _block("a")
     b = _block("b")
+    a.bind_clock(clock)
+    b.bind_clock(clock)
     assert a.decay_score > 0.999, a.decay_score
     assert b.decay_score > 0.999, b.decay_score
 
 
 def test_simulated_clock_differentiates_blocks() -> None:
     """Simulated turn clock: a block created earlier (more ticks ago) decays more."""
-    CLOCK.reset(600.0)  # 600s/turn vs 3600s decay constant
+    clock = Clock(600.0)  # 600s/turn vs 3600s decay constant
     early = _block("early")          # stamped at epoch (0 ticks)
-    CLOCK.tick()                     # +600s
-    CLOCK.tick()                     # +1200s
-    CLOCK.tick()                     # +1800s
+    early.bind_clock(clock)
+    clock.tick()                     # +600s
+    clock.tick()                     # +1200s
+    clock.tick()                     # +1800s
     late = _block("late")            # stamped at +1800s
+    late.bind_clock(clock)
     # early is 1800s old -> exp(-1800/3600)=exp(-0.5)~=0.607
     assert math.isclose(early.decay_score, math.exp(-0.5), rel_tol=1e-3), early.decay_score
     assert late.decay_score > 0.999, late.decay_score
     assert early.decay_score < late.decay_score
-    CLOCK.reset(0.0)  # restore default for other tests
 
 
 def test_record_access_refreshes_recency() -> None:
-    CLOCK.reset(600.0)
+    clock = Clock(600.0)
     blk = _block("x")
-    CLOCK.tick(); CLOCK.tick(); CLOCK.tick()
+    blk.bind_clock(clock)
+    clock.tick(); clock.tick(); clock.tick()
     aged = blk.decay_score
     blk.record_access()              # touch it "now"
     assert blk.access_count == 1
     assert blk.decay_score > aged
     assert blk.decay_score > 0.999
-    CLOCK.reset(0.0)
 
 
 def test_config_priority_weights_are_used() -> None:
     """_priority must reflect config weights, not the old hardcoded 0.6/0.4."""
-    CLOCK.reset(0.0)
-    # All-novelty config: priority depends only on (1 - novelty); decay term zeroed.
     cfg = MemoryConfig(compress_novelty_weight=1.0, compress_recency_weight=0.0)
     store = ContextStore(max_tokens=1000, config=cfg)
+    store.set_clock(Clock(0.0))
     high_nov = _block("aaaa", novelty=0.9)
     low_nov = _block("aaaa", novelty=0.1)  # same token_cost
+    store.add(high_nov)
+    store.add(low_nov)
     p_high = store._priority(high_nov)
     p_low = store._priority(low_nov)
     # low novelty => more compressible => higher priority
@@ -76,6 +80,7 @@ def test_config_priority_weights_are_used() -> None:
 def test_config_pressure_thresholds_are_used() -> None:
     cfg = MemoryConfig(pressure_thresholds={"critical": 0.5, "high": 0.3, "medium": 0.1, "low": 0.0})
     store = ContextStore(max_tokens=100, config=cfg)
+    store.set_clock(Clock(0.0))
     store.add(_block("token " * 60))  # ~60 tokens -> >50% of 100 -> critical
     assert store.budget_pressure == "critical", (store.used_tokens, store.budget_pressure)
 

@@ -4,7 +4,6 @@ from typing import Callable
 
 from ContextManager import ContextManager
 from memory.block import CacheBlock
-from memory.clock import CLOCK
 from memory.config import MemoryConfig
 
 
@@ -22,13 +21,14 @@ class MemoryController:
         self._compress_fn = compress_fn
         self._merge_fn = merge_fn
         self._config = config or context_manager.config
-        # Configure the shared decay clock for this run: wall-clock by default,
-        # or a deterministic per-turn simulated clock when clock_seconds_per_turn > 0.
-        CLOCK.reset(self._config.clock_seconds_per_turn)
 
     # ------------------------------------------------------------------
     # Algorithmic scheduling
     # ------------------------------------------------------------------
+
+    def tick(self) -> None:
+        """Advance the logical clock by one turn (no-op under wall-clock mode)."""
+        self._cm.clock.tick()
 
     def compression_tick(self) -> CacheBlock | None:
         """Pick the highest-priority candidate and compress it.
@@ -126,7 +126,7 @@ class MemoryController:
         (it's also used to score novelty upstream, so we don't re-embed here).
         Advances the logical clock by one turn (no-op under wall-clock mode).
         """
-        CLOCK.tick()
+        self.tick()
         self.pre_prompt_promote(embedding, top_k)
         block = self.insert_or_augment(content, embedding, novelty_score, similarity_threshold)
         self.fit_budget()

@@ -22,7 +22,6 @@ import numpy as np
 
 from ContextManager import ContextManager
 from memory.block import CacheBlock
-from memory.clock import CLOCK
 from memory.config import MemoryConfig
 from memory.longterm import LongTermStore
 from memory.store import ContextStore
@@ -186,16 +185,18 @@ def test_roundtrip_augmented_fact_recoverable_after_removal() -> None:
 
 def test_promote_records_access_on_context_block() -> None:
     """Promotion must refresh in-context recency (not just LT access)."""
-    CLOCK.reset(600.0)
-    cm = _build_cm()
+    cfg = MemoryConfig(clock_seconds_per_turn=600.0)
+    store = ContextStore(max_tokens=100_000, config=cfg)
+    lt = LongTermStore("sqlite:///:memory:", embedding_dim=384)
+    cm = ContextManager(store, lt, embedding_model="all-MiniLM-L6-v2", config=cfg)
     block = _insert(cm, f"Original {TOK_ORIG}")
     r1 = cm.compress(block.id, _survivable_compress(TOK_ORIG))
     pointer = r1.pointer_to_lt_id
     assert cm._store.get(block.id) is not None
 
-    CLOCK.tick()
-    CLOCK.tick()
-    CLOCK.tick()
+    cm.clock.tick()
+    cm.clock.tick()
+    cm.clock.tick()
     aged_decay = cm._store.get(block.id).decay_score
 
     promoted = cm.promote(pointer)
@@ -211,7 +212,6 @@ def test_promote_records_access_on_context_block() -> None:
     assert promoted2 is not None
     assert promoted2.access_count >= 1
     assert promoted2.decay_score > 0.99
-    CLOCK.reset(0.0)
 
 
 def test_compress_low_fidelity_guard_reconciles_dirty_block() -> None:

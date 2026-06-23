@@ -7,6 +7,7 @@ from typing import Callable
 import numpy as np
 
 from memory.block import CacheBlock, LongTermBlock
+from memory.clock import Clock
 from memory.config import MemoryConfig
 from memory.embeddings import Embedder, make_embedder
 from memory.longterm import LongTermStore
@@ -45,6 +46,9 @@ class ContextManager:
         self._lt = lt_store
         # Default to the store's config so both layers share one source of truth.
         self._config = config or store.config
+        self._clock = Clock(self._config.clock_seconds_per_turn)
+        self._store.set_clock(self._clock)
+        self._lt.set_clock(self._clock)
         # Accept any embedder instance (SentenceTransformer, OpenAIEmbedder, ...)
         # or a string spec resolved by make_embedder (local ST name, or an OpenAI
         # model like "text-embedding-3-small" / "openai:<model>").
@@ -61,6 +65,10 @@ class ContextManager:
     @property
     def config(self) -> MemoryConfig:
         return self._config
+
+    @property
+    def clock(self) -> Clock:
+        return self._clock
 
     @contextmanager
     def using_source_date(self, source_date: datetime | None):

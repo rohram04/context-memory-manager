@@ -8,7 +8,7 @@ import numpy as np
 from sqlalchemy import create_engine, text
 
 from memory.block import LongTermBlock
-from memory.clock import CLOCK
+from memory.clock import Clock
 
 UTC = timezone.utc
 
@@ -57,7 +57,11 @@ class LongTermStore:
         self._engine = create_engine(url, **kwargs)
         self._dialect = self._engine.dialect.name
         self._embedding_dim = embedding_dim
+        self._clock: Clock | None = None
         self._create_tables()
+
+    def set_clock(self, clock: Clock) -> None:
+        self._clock = clock
 
     # ------------------------------------------------------------------
     # Schema
@@ -138,7 +142,9 @@ class LongTermStore:
         if isinstance(last_accessed, str):
             last_accessed = datetime.fromisoformat(last_accessed)
         if last_accessed is None:
-            last_accessed = CLOCK.now()
+            if self._clock is None:
+                raise RuntimeError("LongTermStore has no clock; call set_clock() first.")
+            last_accessed = self._clock.now()
         if last_accessed.tzinfo is None:
             last_accessed = last_accessed.replace(tzinfo=UTC)
 
@@ -154,7 +160,7 @@ class LongTermStore:
             original_embedding = _parse_pg_vec(row.get("original_embedding"))
         is_reconstructed = bool(row["is_reconstructed"])
 
-        return LongTermBlock(
+        block = LongTermBlock(
             id=row["id"],
             content=row["content"],
             fidelity=row["fidelity"],
@@ -166,12 +172,18 @@ class LongTermStore:
             is_reconstructed=is_reconstructed,
             original_embedding=original_embedding,
         )
+        if self._clock is not None:
+            block.bind_clock(self._clock)
+        return block
 
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
 
     def add(self, block: LongTermBlock) -> None:
+        if self._clock is None:
+            raise RuntimeError("LongTermStore has no clock; call set_clock() first.")
+        block.bind_clock(self._clock)
         row = self._to_row(block)
         with self._engine.connect() as conn:
             conn.execute(text("""

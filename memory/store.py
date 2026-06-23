@@ -5,6 +5,7 @@ import heapq
 import numpy as np
 
 from memory.block import CacheBlock
+from memory.clock import Clock
 from memory.config import MemoryConfig
 
 
@@ -14,6 +15,12 @@ class ContextStore:
         self._config = config or MemoryConfig()
         self._blocks: dict[str, CacheBlock] = {}
         self._heap: list[tuple[float, str]] = []  # (-priority, block_id)
+        self._clock: Clock | None = None
+
+    def set_clock(self, clock: Clock) -> None:
+        self._clock = clock
+        for block in self._blocks.values():
+            block.bind_clock(clock)
 
     @property
     def config(self) -> MemoryConfig:
@@ -37,6 +44,9 @@ class ContextStore:
     # ------------------------------------------------------------------
 
     def add(self, block: CacheBlock) -> None:
+        if self._clock is None:
+            raise RuntimeError("ContextStore has no clock; call set_clock() first.")
+        block.bind_clock(self._clock)
         self._blocks[block.id] = block
         heapq.heappush(self._heap, (-self._priority(block), block.id))
 
